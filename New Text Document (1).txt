@@ -1,0 +1,2678 @@
+
+i want to build a website for lottery  management system using java, spring boot,mycroservice mysql, and latest stups can u please help me to guide step by step 
+
+
+Absolutely. We can build it **step by step**, and I can act like your technical lead throughout the project—not just give you random code snippets.
+
+One important correction first: **“latest” does not automatically mean “best for production.”** As of October 2026, Java 27 is the newest JDK, but Java 25 is the current LTS release. For a serious project, I recommend **Java 25 LTS** rather than Java 27. ([Oracle][1])
+
+For Spring, Spring Boot 4.1.x is available, while the stable Spring Cloud train is 2025.1.3; Spring Cloud 2026.0 is still a milestone/development release, so I would **not** use it for our production baseline. ([Home][2])
+
+## 1. Technology stack I recommend
+
+| Layer                 | Technology                            |
+| --------------------- | ------------------------------------- |
+| Language              | **Java 25 LTS**                       |
+| Backend               | **Spring Boot 4.1.x**                 |
+| Microservices         | **Spring Cloud 2025.1.x**             |
+| API                   | REST / JSON                           |
+| Database              | **MySQL 9.7 LTS**                     |
+| ORM                   | Spring Data JPA / Hibernate           |
+| Security              | Spring Security + JWT/OAuth2          |
+| API Gateway           | Spring Cloud Gateway                  |
+| Service communication | REST initially, events later          |
+| Messaging             | Kafka                                 |
+| Cache                 | Redis                                 |
+| Database migration    | Flyway                                |
+| Documentation         | OpenAPI / Swagger                     |
+| Testing               | JUnit 5 + Mockito + Testcontainers    |
+| Build                 | Maven                                 |
+| Containers            | Docker                                |
+| Orchestration         | Kubernetes                            |
+| Frontend              | React + TypeScript                    |
+| Monitoring            | Actuator + Micrometer + OpenTelemetry |
+| CI/CD                 | GitHub Actions                        |
+| Code quality          | SonarQube                             |
+| IDE                   | IntelliJ IDEA                         |
+
+MySQL 9.7 is an LTS release, so it is a sensible production database choice. ([MySQL][3])
+
+---
+
+# 2. What exactly are we building?
+
+Let's make this a realistic **Lottery Management System**, rather than a toy CRUD application.
+
+The system could support:
+
+### Admin
+
+* Login
+* User management
+* Role management
+* Lottery creation
+* Lottery configuration
+* Ticket price
+* Number ranges
+* Draw scheduling
+* Prize configuration
+* Winner declaration
+* Reports
+* Sales monitoring
+* Audit logs
+
+### Agent / Retailer
+
+* Login
+* View available lotteries
+* Sell tickets
+* Search ticket
+* Cancel ticket where permitted
+* View sales
+* View commissions
+* View winning tickets
+
+### Customer
+
+* Register/login
+* Browse lotteries
+* Purchase ticket
+* View tickets
+* Check results
+* View winning numbers
+* Claim status
+
+### Lottery
+
+For example:
+
+```text
+Lottery
+ ├── Lottery ID
+ ├── Name
+ ├── Ticket Price
+ ├── Start Date
+ ├── End Date
+ ├── Draw Date
+ ├── Status
+ └── Prize Structure
+```
+
+Example:
+
+```text
+Mega Sunday Lottery
+
+Ticket Price: ₹100
+
+1st Prize: ₹10,00,000
+2nd Prize: ₹1,00,000
+3rd Prize: ₹10,000
+4th Prize: ₹1,000
+
+Draw: Sunday 8:00 PM
+```
+
+---
+
+# 3. Don't start with 15 microservices
+
+This is where many developers make a bad architectural decision.
+
+They create:
+
+```text
+user-service
+auth-service
+lottery-service
+ticket-service
+payment-service
+winner-service
+notification-service
+report-service
+agent-service
+admin-service
+...
+```
+
+before writing a single business rule.
+
+That's unnecessary complexity.
+
+I would start with **5–6 well-defined services**:
+
+```text
+                    ┌─────────────────┐
+                    │    React UI     │
+                    └────────┬────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │   API Gateway   │
+                    └────────┬────────┘
+                             │
+          ┌──────────────────┼──────────────────┐
+          │                  │                  │
+          ▼                  ▼                  ▼
+   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+   │ Auth/User   │    │  Lottery    │    │   Ticket    │
+   │   Service   │    │   Service   │    │   Service   │
+   └─────────────┘    └─────────────┘    └─────────────┘
+          │                  │                  │
+          ▼                  ▼                  ▼
+       MySQL              MySQL              MySQL
+
+                    ┌─────────────────┐
+                    │  Draw/Winner    │
+                    │    Service      │
+                    └────────┬────────┘
+                             │
+                             ▼
+                           Kafka
+                             │
+               ┌─────────────┼─────────────┐
+               ▼             ▼             ▼
+          Notification     Report       Audit
+             Service       Service      Service
+```
+
+Each important service owns its own data.
+
+---
+
+# 4. Database architecture
+
+For microservices, **don't create one giant shared database schema**.
+
+Instead:
+
+```text
+auth_db
+lottery_db
+ticket_db
+draw_db
+notification_db
+```
+
+For example:
+
+### auth_db
+
+```text
+users
+roles
+permissions
+user_roles
+refresh_tokens
+```
+
+### lottery_db
+
+```text
+lotteries
+lottery_prize_tiers
+lottery_rules
+lottery_schedules
+```
+
+### ticket_db
+
+```text
+tickets
+ticket_numbers
+ticket_transactions
+ticket_cancellations
+```
+
+### draw_db
+
+```text
+draws
+draw_numbers
+winners
+prize_claims
+```
+
+This gives us proper service boundaries.
+
+---
+
+# 5. Important lottery business rule
+
+There is one area where I would be particularly strict:
+
+**Randomness and winner selection must not be implemented casually.**
+
+For example, don't write:
+
+```java
+Random random = new Random();
+```
+
+and call that a lottery engine.
+
+Depending on the jurisdiction and whether this is a real-money lottery, the requirements around randomness, auditability, security, licensing, taxation, age restrictions, geographic restrictions, and draw integrity can be substantial.
+
+For a learning/demo project, we can build a deterministic simulated draw engine.
+
+For a real-money production system, we'd design the draw/audit mechanism around the applicable legal and regulatory requirements.
+
+---
+
+# 6. Project phases
+
+We'll build this in phases.
+
+## Phase 1 — Requirements
+
+We'll define:
+
+```text
+Users
+Roles
+Lottery
+Ticket
+Draw
+Prize
+Winner
+Payment
+Commission
+Reports
+Notifications
+Audit
+```
+
+We'll also define every workflow.
+
+Example:
+
+```text
+Agent Login
+     ↓
+Select Lottery
+     ↓
+Select Ticket
+     ↓
+Payment
+     ↓
+Generate Ticket
+     ↓
+Store Ticket
+     ↓
+Generate Receipt
+```
+
+---
+
+# Phase 2 — System architecture
+
+We'll create:
+
+* High-level architecture
+* Microservice boundaries
+* Database-per-service design
+* API contracts
+* Authentication flow
+* Event flow
+* Error handling strategy
+
+We'll also create diagrams.
+
+---
+
+# Phase 3 — Development environment
+
+We'll install/configure:
+
+```text
+JDK 25
+IntelliJ IDEA
+Maven
+Docker
+Docker Compose
+MySQL
+Redis
+Kafka
+Git
+GitHub
+Postman
+```
+
+Then verify:
+
+```bash
+java --version
+mvn --version
+docker --version
+git --version
+```
+
+---
+
+# Phase 4 — Create the first service
+
+We'll start with:
+
+```text
+lottery-management/
+│
+├── api-gateway/
+├── auth-service/
+├── lottery-service/
+├── ticket-service/
+├── draw-service/
+├── notification-service/
+│
+├── docker-compose.yml
+├── README.md
+└── pom.xml
+```
+
+But I want to emphasize: **we don't have to implement all of these immediately.**
+
+First:
+
+```text
+api-gateway
+auth-service
+lottery-service
+```
+
+Then add the others.
+
+---
+
+# Phase 5 — Authentication
+
+We'll implement:
+
+```text
+POST /api/auth/register
+POST /api/auth/login
+POST /api/auth/refresh
+POST /api/auth/logout
+```
+
+JWT-based authentication.
+
+Roles:
+
+```text
+ADMIN
+AGENT
+CUSTOMER
+AUDITOR
+```
+
+Then authorization:
+
+```java
+@PreAuthorize("hasRole('ADMIN')")
+```
+
+etc.
+
+---
+
+# Phase 6 — Lottery service
+
+Example APIs:
+
+```http
+POST   /api/lotteries
+GET    /api/lotteries
+GET    /api/lotteries/{id}
+PUT    /api/lotteries/{id}
+DELETE /api/lotteries/{id}
+
+POST   /api/lotteries/{id}/activate
+POST   /api/lotteries/{id}/close
+```
+
+Entity:
+
+```java
+Lottery
+```
+
+with fields such as:
+
+```text
+id
+name
+code
+ticketPrice
+startDate
+endDate
+drawDate
+status
+createdAt
+updatedAt
+```
+
+Status:
+
+```text
+DRAFT
+ACTIVE
+CLOSED
+DRAWN
+CANCELLED
+```
+
+---
+
+# Phase 7 — Ticket service
+
+Ticket generation becomes a major part of the project.
+
+Example:
+
+```text
+Lottery
+   ↓
+Ticket Purchase
+   ↓
+Generate Ticket Number
+   ↓
+Validate
+   ↓
+Save
+   ↓
+Publish TicketSoldEvent
+```
+
+Kafka event:
+
+```json
+{
+  "eventType": "TICKET_SOLD",
+  "ticketId": "TKT-2026-000001",
+  "lotteryId": "LOT-001",
+  "amount": 100,
+  "timestamp": "2026-10-07T17:00:00"
+}
+```
+
+---
+
+# Phase 8 — Draw service
+
+This service handles:
+
+```text
+Draw scheduling
+Draw execution
+Winning number generation
+Winner calculation
+Draw result publication
+```
+
+Event:
+
+```text
+DrawCompletedEvent
+```
+
+Then:
+
+```text
+Draw Service
+       │
+       ▼
+     Kafka
+       │
+ ┌─────┼─────────┐
+ ▼     ▼         ▼
+Ticket Winner Notification
+Service Service Service
+```
+
+---
+
+# Phase 9 — Payment
+
+For a learning project:
+
+```text
+Payment Service
+```
+
+can initially use:
+
+```text
+MOCK_PAYMENT
+```
+
+Don't integrate a real payment gateway until the core system works.
+
+Then later:
+
+```text
+Razorpay / Stripe / other permitted provider
+```
+
+depending on your target jurisdiction and business model.
+
+---
+
+# Phase 10 — Notifications
+
+Events can trigger:
+
+```text
+Email
+SMS
+Push notification
+```
+
+For example:
+
+```text
+Ticket purchased
+       ↓
+Kafka
+       ↓
+Notification Service
+       ↓
+Email/SMS
+```
+
+---
+
+# Phase 11 — Admin dashboard
+
+We'll create a professional dashboard:
+
+```text
+┌───────────────────────────────────────────────┐
+│ Lottery Management System                    │
+├─────────────┬─────────────────────────────────┤
+│ Dashboard   │                                 │
+│ Lotteries   │  Total Sales     ₹15,45,000    │
+│ Tickets     │                                 │
+│ Draws       │  Tickets Sold       15,450     │
+│ Winners     │                                 │
+│ Agents      │  Active Lotteries        8     │
+│ Reports     │                                 │
+│ Audit Logs  │  Winners               125     │
+└─────────────┴─────────────────────────────────┘
+```
+
+---
+
+# Phase 12 — Testing
+
+This is where we'll make it interview/project quality.
+
+We'll use:
+
+### Unit testing
+
+```text
+JUnit 5
+Mockito
+```
+
+### Integration testing
+
+```text
+Spring Boot Test
+Testcontainers
+MySQL container
+Kafka container
+```
+
+### API testing
+
+```text
+Postman
+REST Assured
+```
+
+### Security testing
+
+We'll test:
+
+```text
+Authentication
+Authorization
+JWT expiry
+Role restrictions
+Invalid tokens
+SQL injection
+Input validation
+```
+
+---
+
+# Phase 13 — Docker
+
+Eventually:
+
+```text
+docker-compose.yml
+```
+
+will run:
+
+```text
+MySQL
+Redis
+Kafka
+Zookeeper/KRaft infrastructure as applicable
+Auth Service
+Lottery Service
+Ticket Service
+Draw Service
+Gateway
+Frontend
+```
+
+---
+
+# Phase 14 — Kubernetes
+
+Then we'll move from:
+
+```text
+Docker Compose
+```
+
+to:
+
+```text
+Kubernetes
+```
+
+with:
+
+```text
+Deployment
+Service
+ConfigMap
+Secret
+Ingress
+HPA
+```
+
+And eventually:
+
+```text
+GitHub
+   ↓
+GitHub Actions
+   ↓
+Build
+   ↓
+Test
+   ↓
+Docker Image
+   ↓
+Container Registry
+   ↓
+Kubernetes
+```
+
+---
+
+# 7. Architecture we'll aim for
+
+The final system can look like:
+
+```text
+                    INTERNET
+                       │
+                       ▼
+                 ┌───────────┐
+                 │  React UI │
+                 └─────┬─────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │   API Gateway   │
+              └────────┬────────┘
+                       │
+       ┌───────────────┼────────────────┐
+       │               │                │
+       ▼               ▼                ▼
+┌────────────┐  ┌────────────┐  ┌────────────┐
+│Auth Service│  │   Lottery  │  │   Ticket   │
+│            │  │   Service  │  │   Service  │
+└─────┬──────┘  └─────┬──────┘  └─────┬──────┘
+      │               │                │
+      ▼               ▼                ▼
+  auth_db         lottery_db        ticket_db
+
+
+                 ┌────────────┐
+                 │ Draw       │
+                 │ Service    │
+                 └─────┬──────┘
+                       │
+                       ▼
+                    KAFKA
+                       │
+          ┌────────────┼─────────────┐
+          ▼            ▼             ▼
+   Notification     Reports       Audit
+     Service        Service       Service
+```
+
+---
+
+# 8. Our first milestone
+
+I suggest we **don't jump straight into coding everything**.
+
+We'll do this in the following order:
+
+### Step 1
+
+**Finalize requirements**
+
+### Step 2
+
+**Create complete system architecture**
+
+### Step 3
+
+**Design database ER diagram**
+
+### Step 4
+
+**Define microservices**
+
+### Step 5
+
+**Create Git repository/project structure**
+
+### Step 6
+
+**Create Spring Boot services**
+
+### Step 7
+
+**Configure MySQL + Flyway**
+
+### Step 8
+
+**Implement authentication**
+
+### Step 9
+
+**Implement Lottery CRUD**
+
+### Step 10
+
+**Implement Ticket management**
+
+### Step 11
+
+**Implement Draw/Winner**
+
+### Step 12
+
+**Add Kafka**
+
+### Step 13
+
+**Add Redis**
+
+### Step 14
+
+**Build React frontend**
+
+### Step 15
+
+**Testing**
+
+### Step 16
+
+**Docker**
+
+### Step 17
+
+**Kubernetes**
+
+### Step 18
+
+**CI/CD**
+
+### Step 19
+
+**Production security + observability**
+
+---
+
+## One more architectural decision
+
+For this project, I'd use:
+
+**Java 25 LTS + Spring Boot 4.1.x + Spring Cloud 2025.1.3 + MySQL 9.7 LTS + Kafka + Redis + React/TypeScript + Docker + Kubernetes.**
+
+That gives you a modern stack without chasing unstable milestone releases. Spring Cloud's own documentation currently identifies **2025.1.3 as the latest stable release**, while 2026.0.0-M1 is explicitly not stable. ([Home][4])
+
+### What I can do next
+
+We can make this a **real project tutorial**, where I give you the actual code at every stage rather than just explaining concepts.
+
+**Next, I recommend we start with Step 1: the complete requirements + modules + user roles + business workflows + ER diagram for the Lottery Management System.** Then we'll move into creating the actual Spring Boot project and write the first code.
+
+[1]: https://www.oracle.com/java/technologies/downloads/?utm_source=chatgpt.com "Java Downloads | Oracle"
+[2]: https://spring.io/blog/2026/06/10/spring-boot-4/?utm_source=chatgpt.com "Spring Boot 4.1.0 available now"
+[3]: https://www.mysql.com/news-and-events/?utm_source=chatgpt.com "MySQL :: MySQL News Announcements"
+[4]: https://spring.io/blog/2026/08/20/spring-cloud-2025-1-3-has-been-released/?utm_source=chatgpt.com "Spring Cloud 2025.1.3 (aka Oakwood) Has Been Released"
+
+# Step 1 — Lottery Management System Requirements
+
+We'll treat this as a **production-style learning project**, not a simple CRUD application.
+
+I checked the current Spring releases before locking the stack: Java 25 is the current LTS, Java 27 is the latest non-LTS release; Spring Boot 4.1.1 is available, and Spring Cloud 2025.1.3 is the current stable release train. ([Oracle][1])
+
+---
+
+## 1. Our system
+
+Let's call the project:
+
+**Lottery Management System — LMS**
+
+The major actors are:
+
+```text
+                    LOTTERY MANAGEMENT SYSTEM
+                              │
+             ┌────────────────┼────────────────┐
+             │                │                │
+           ADMIN            AGENT           CUSTOMER
+             │                │                │
+             ▼                ▼                ▼
+        Manage system    Sell tickets      Buy tickets
+        Manage lottery  View sales        View tickets
+        Manage draws    Commission        Check results
+        Manage users    Reports           Claim prize
+        Reports
+```
+
+---
+
+# 2. User roles
+
+We'll initially have four roles.
+
+### ADMIN
+
+Full access.
+
+```text
+Create lottery
+Update lottery
+Activate/deactivate lottery
+Configure prizes
+Manage agents
+Manage customers
+Schedule draws
+Run/approve draw
+View winners
+View reports
+View audit logs
+```
+
+### AGENT
+
+A retailer/distributor who sells tickets.
+
+```text
+Login
+View active lotteries
+Sell ticket
+Search ticket
+Cancel ticket if permitted
+View sales
+View commission
+View winning tickets
+```
+
+### CUSTOMER
+
+```text
+Register
+Login
+View lotteries
+Buy ticket
+View my tickets
+Check results
+View winning tickets
+Track prize claim
+```
+
+### AUDITOR
+
+Read-only access.
+
+```text
+View lotteries
+View tickets
+View draws
+View winners
+View transactions
+View audit logs
+Generate reports
+```
+
+This role is useful because a real financial/lottery system should not allow the same person to freely modify data and audit their own modifications.
+
+---
+
+# 3. Lottery lifecycle
+
+This is one of the most important parts of our design.
+
+A lottery shouldn't simply have:
+
+```text
+ACTIVE / INACTIVE
+```
+
+We'll use:
+
+```text
+DRAFT
+   ↓
+SCHEDULED
+   ↓
+ACTIVE
+   ↓
+SALES_CLOSED
+   ↓
+DRAW_PENDING
+   ↓
+DRAW_COMPLETED
+   ↓
+SETTLED
+```
+
+There can also be:
+
+```text
+CANCELLED
+```
+
+Example:
+
+```text
+Mega Sunday
+     │
+     ▼
+   DRAFT
+     │
+     ▼
+ SCHEDULED
+     │
+     ▼
+   ACTIVE
+     │
+     │ tickets sold
+     ▼
+SALES_CLOSED
+     │
+     ▼
+DRAW_PENDING
+     │
+     ▼
+DRAW_COMPLETED
+     │
+     ▼
+   SETTLED
+```
+
+This prevents messy business logic later.
+
+---
+
+# 4. Lottery configuration
+
+Admin creates a lottery.
+
+Example:
+
+```text
+Lottery Name: Mega Sunday
+Lottery Code: MS-2026
+Ticket Price: ₹100
+
+Sales Start:
+2026-10-01 00:00
+
+Sales End:
+2026-10-11 18:00
+
+Draw:
+2026-10-11 20:00
+```
+
+Prize structure:
+
+```text
+Prize Tier       Amount       Winners
+--------------------------------------
+1st Prize        ₹10,00,000      1
+2nd Prize        ₹1,00,000       5
+3rd Prize        ₹10,000        50
+4th Prize        ₹1,000        500
+```
+
+We should **not hard-code these values**.
+
+They belong in database configuration.
+
+---
+
+# 5. Ticket lifecycle
+
+A ticket will have its own lifecycle.
+
+```text
+CREATED
+   ↓
+PAYMENT_PENDING
+   ↓
+PAID
+   ↓
+ISSUED
+   ↓
+DRAWN
+   ↓
+WINNER / NON_WINNER
+   ↓
+CLAIMED
+```
+
+For cancellation:
+
+```text
+ISSUED
+   ↓
+CANCELLED
+```
+
+But cancellation must be subject to lottery rules.
+
+For example:
+
+```text
+Sales open
+   ↓
+Ticket purchased
+   ↓
+Ticket issued
+   ↓
+Sales closed
+   ↓
+Cancellation impossible
+```
+
+That's much safer than allowing an arbitrary `DELETE /tickets/{id}`.
+
+---
+
+# 6. Ticket structure
+
+Example:
+
+```text
+Ticket ID
+--------------------------------
+TKT-20261011-0000001234
+
+Lottery:
+Mega Sunday
+
+Lottery ID:
+LOT-0001
+
+Ticket Number:
+A-123456
+
+Price:
+₹100
+
+Customer:
+CUS-000123
+
+Agent:
+AGT-000045
+
+Purchase Time:
+2026-10-08 10:30:15
+
+Status:
+ISSUED
+
+QR Code:
+<generated>
+```
+
+Notice something important:
+
+**Ticket ID and ticket number are different things.**
+
+That's intentional.
+
+---
+
+# 7. Draw system
+
+We'll keep draw logic isolated in a dedicated service.
+
+```text
+Draw Service
+```
+
+Workflow:
+
+```text
+Sales Closed
+     ↓
+Validate lottery
+     ↓
+Lock lottery
+     ↓
+Collect eligible tickets
+     ↓
+Execute draw
+     ↓
+Generate winning result
+     ↓
+Calculate winners
+     ↓
+Persist result
+     ↓
+Publish DrawCompletedEvent
+```
+
+Then Kafka can notify other services.
+
+```text
+                    Draw Service
+                         │
+                         ▼
+                  DrawCompletedEvent
+                         │
+                       Kafka
+                         │
+        ┌────────────────┼────────────────┐
+        ▼                ▼                ▼
+ Winner Service    Notification      Reporting
+                       Service          Service
+```
+
+---
+
+# 8. Database model
+
+We'll eventually have separate databases.
+
+### Auth database
+
+```text
+users
+roles
+permissions
+user_roles
+refresh_tokens
+```
+
+### Lottery database
+
+```text
+lotteries
+lottery_rules
+prize_tiers
+lottery_schedules
+```
+
+### Ticket database
+
+```text
+tickets
+ticket_transactions
+ticket_cancellations
+```
+
+### Draw database
+
+```text
+draws
+winning_numbers
+winners
+prize_claims
+```
+
+### Audit database
+
+```text
+audit_events
+```
+
+---
+
+# 9. Initial ER relationship
+
+Conceptually:
+
+```text
+USER
+ │
+ ├───────────────┐
+ │               │
+ ▼               ▼
+CUSTOMER        AGENT
+ │               │
+ │               │
+ └───────┬───────┘
+         │
+         ▼
+       TICKET
+         │
+         │ belongs to
+         ▼
+      LOTTERY
+         │
+         │ has
+         ▼
+    PRIZE_TIER
+         
+LOTTERY
+   │
+   ▼
+  DRAW
+   │
+   ▼
+ WINNER
+   │
+   ▼
+PRIZE_CLAIM
+```
+
+But don't worry about the final ER diagram yet. We'll design that properly before writing entities.
+
+---
+
+# 10. Microservices
+
+Here's the architecture I want us to implement.
+
+```text
+                         React
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ API Gateway │
+                    └──────┬──────┘
+                           │
+       ┌───────────────────┼───────────────────┐
+       │                   │                   │
+       ▼                   ▼                   ▼
+┌────────────┐      ┌────────────┐      ┌────────────┐
+│Auth Service│      │  Lottery   │      │   Ticket   │
+│            │      │  Service   │      │  Service   │
+└────────────┘      └────────────┘      └────────────┘
+       │                   │                   │
+       ▼                   ▼                   ▼
+   auth_db             lottery_db           ticket_db
+
+
+                    ┌────────────┐
+                    │Draw Service│
+                    └──────┬─────┘
+                           │
+                           ▼
+                         Kafka
+                           │
+             ┌─────────────┼─────────────┐
+             ▼             ▼             ▼
+       Winner Service  Notification   Reporting
+                          Service       Service
+```
+
+### Services
+
+| Service              | Responsibility               |
+| -------------------- | ---------------------------- |
+| API Gateway          | Entry point                  |
+| Auth Service         | Authentication/authorization |
+| Lottery Service      | Lottery configuration        |
+| Ticket Service       | Ticket lifecycle             |
+| Draw Service         | Draw execution               |
+| Winner Service       | Winner/prize processing      |
+| Notification Service | Email/SMS                    |
+| Reporting Service    | Reports                      |
+| Audit Service        | Immutable audit trail        |
+
+But we'll **build them incrementally**, not all at once.
+
+---
+
+# 11. API Gateway
+
+Frontend won't directly call every microservice.
+
+Instead:
+
+```text
+React
+  │
+  ▼
+API Gateway
+  │
+  ├── /api/auth/**
+  │
+  ├── /api/lotteries/**
+  │
+  ├── /api/tickets/**
+  │
+  ├── /api/draws/**
+  │
+  └── /api/winners/**
+```
+
+For example:
+
+```http
+GET /api/lotteries
+```
+
+Gateway routes it to:
+
+```text
+lottery-service
+```
+
+---
+
+# 12. Authentication flow
+
+We'll use JWT.
+
+```text
+User
+ │
+ │ username/password
+ ▼
+Auth Service
+ │
+ │ authenticate
+ ▼
+JWT
+ │
+ ▼
+Frontend
+ │
+ │ Authorization: Bearer <JWT>
+ ▼
+API Gateway
+ │
+ ▼
+Microservice
+```
+
+JWT will contain information such as:
+
+```json
+{
+  "sub": "user123",
+  "roles": [
+    "AGENT"
+  ],
+  "iat": "...",
+  "exp": "..."
+}
+```
+
+We'll also implement refresh tokens rather than making users log in every time the access token expires.
+
+---
+
+# 13. Core APIs
+
+Eventually we'll have APIs like:
+
+### Authentication
+
+```http
+POST /api/auth/login
+POST /api/auth/register
+POST /api/auth/refresh
+POST /api/auth/logout
+```
+
+### Lottery
+
+```http
+POST   /api/lotteries
+GET    /api/lotteries
+GET    /api/lotteries/{id}
+PUT    /api/lotteries/{id}
+POST   /api/lotteries/{id}/activate
+POST   /api/lotteries/{id}/close
+```
+
+### Tickets
+
+```http
+POST /api/tickets
+GET  /api/tickets/{id}
+GET  /api/tickets/my
+POST /api/tickets/{id}/cancel
+```
+
+### Draw
+
+```http
+POST /api/draws
+GET  /api/draws/{id}
+POST /api/draws/{id}/execute
+GET  /api/draws/{id}/result
+```
+
+### Winners
+
+```http
+GET /api/winners
+GET /api/winners/{id}
+POST /api/winners/{id}/claim
+```
+
+We'll refine these APIs before implementation.
+
+---
+
+# 14. Events
+
+This is where the project starts becoming a proper microservices project instead of multiple CRUD applications.
+
+Examples:
+
+```text
+LotteryActivatedEvent
+TicketPurchasedEvent
+TicketCancelledEvent
+SalesClosedEvent
+DrawStartedEvent
+DrawCompletedEvent
+WinnerDeclaredEvent
+PrizeClaimedEvent
+```
+
+For example:
+
+```text
+Ticket Service
+      │
+      │ TicketPurchasedEvent
+      ▼
+    Kafka
+      │
+      ├──────────────► Reporting Service
+      │
+      ├──────────────► Notification Service
+      │
+      └──────────────► Audit Service
+```
+
+The Ticket Service doesn't need to know how reporting or notifications work.
+
+That's the point of event-driven architecture.
+
+---
+
+# 15. Security requirements
+
+This system involves money and potentially regulated activity, so security isn't something we'll bolt on at the end.
+
+We'll implement:
+
+```text
+JWT
+Role-based authorization
+Password hashing
+Input validation
+Rate limiting
+HTTPS
+CORS
+CSRF considerations
+SQL injection protection
+Audit logging
+Sensitive-data masking
+Idempotency
+Secure secrets
+Database least privilege
+```
+
+We'll also avoid storing things like:
+
+```text
+plain-text passwords
+raw payment credentials
+JWT secrets in Git
+database passwords in source code
+```
+
+---
+
+# 16. Observability
+
+Every microservice will eventually expose:
+
+```text
+/actuator/health
+/actuator/info
+/actuator/metrics
+```
+
+We'll introduce:
+
+```text
+Micrometer
+OpenTelemetry
+Prometheus
+Grafana
+```
+
+and distributed tracing.
+
+Example:
+
+```text
+Customer
+   ↓
+Gateway
+   ↓
+Ticket Service
+   ↓
+Payment
+   ↓
+Kafka
+   ↓
+Notification
+```
+
+We should be able to trace one request across the entire system.
+
+---
+
+# 17. Our Git project
+
+Eventually we'll have:
+
+```text
+lottery-management-system/
+│
+├── api-gateway/
+│
+├── auth-service/
+│
+├── lottery-service/
+│
+├── ticket-service/
+│
+├── draw-service/
+│
+├── winner-service/
+│
+├── notification-service/
+│
+├── reporting-service/
+│
+├── audit-service/
+│
+├── frontend/
+│
+├── infrastructure/
+│   ├── docker/
+│   ├── kubernetes/
+│   └── monitoring/
+│
+├── docs/
+│
+├── docker-compose.yml
+│
+└── README.md
+```
+
+---
+
+# 18. Development roadmap
+
+We'll now follow this exact sequence:
+
+```text
+STEP 1  Requirements                 ← We are here
+   ↓
+STEP 2  Architecture
+   ↓
+STEP 3  Database / ER Diagram
+   ↓
+STEP 4  API Design
+   ↓
+STEP 5  Git + Project Structure
+   ↓
+STEP 6  Auth Service
+   ↓
+STEP 7  Lottery Service
+   ↓
+STEP 8  Ticket Service
+   ↓
+STEP 9  Draw Service
+   ↓
+STEP 10 Winner Service
+   ↓
+STEP 11 Kafka
+   ↓
+STEP 12 Redis
+   ↓
+STEP 13 React Frontend
+   ↓
+STEP 14 Testing
+   ↓
+STEP 15 Docker
+   ↓
+STEP 16 Kubernetes
+   ↓
+STEP 17 CI/CD
+   ↓
+STEP 18 Monitoring
+   ↓
+STEP 19 Production Hardening
+```
+
+## Next: Step 2 — Architecture
+
+Before writing Java code, we'll design **the actual architecture in detail**:
+
+1. Complete microservice diagram
+2. Responsibility of every service
+3. Which services communicate through REST
+4. Which communication uses Kafka
+5. Database ownership
+6. Authentication flow
+7. Ticket purchase flow
+8. Draw/winner flow
+9. Failure scenarios
+10. Folder/repository architecture
+
+Then we'll move to the **actual Spring Boot project creation**, including the `pom.xml`, Java packages, configuration files, MySQL connection, and first REST API.
+
+One correction to my previous answer: **Java 27 is indeed the latest JDK, but Java 25 is the current LTS**, so we'll deliberately use Java 25 for this project. ([Oracle][1])
+
+[1]: https://www.oracle.com/java/technologies/downloads/?utm_source=chatgpt.com "Java Downloads | Oracle"
+
+
+# Step 2 — Detailed Microservice Architecture
+
+Now we move from requirements to the **actual technical architecture**.
+
+The goal is to make this something you could put on GitHub and explain in a senior Java/Spring Boot interview.
+
+---
+
+## 1. Final architecture
+
+```text
+                         ┌─────────────────────┐
+                         │      CUSTOMER       │
+                         │       AGENT         │
+                         │       ADMIN         │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │   React Frontend    │
+                         │   TypeScript        │
+                         └──────────┬──────────┘
+                                    │ HTTPS
+                                    ▼
+                         ┌─────────────────────┐
+                         │     API GATEWAY     │
+                         │ Spring Cloud        │
+                         │ Gateway             │
+                         └──────────┬──────────┘
+                                    │
+          ┌─────────────────────────┼─────────────────────────┐
+          │                         │                         │
+          ▼                         ▼                         ▼
+ ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
+ │  AUTH SERVICE   │       │ LOTTERY SERVICE │       │ TICKET SERVICE  │
+ │                 │       │                 │       │                 │
+ │ Login           │       │ Lottery CRUD    │       │ Ticket purchase │
+ │ Register        │       │ Prize config    │       │ Ticket search   │
+ │ JWT             │       │ Schedule        │       │ Cancellation    │
+ │ Users/Roles     │       │ Status          │       │ Ticket status   │
+ └────────┬────────┘       └────────┬────────┘       └────────┬────────┘
+          │                         │                         │
+          ▼                         ▼                         ▼
+     ┌─────────┐              ┌───────────┐             ┌───────────┐
+     │ auth_db │              │ lottery_db│             │ ticket_db │
+     └─────────┘              └───────────┘             └───────────┘
+
+                                    │
+                                    ▼
+                          ┌──────────────────┐
+                          │   DRAW SERVICE   │
+                          │                  │
+                          │ Schedule draw    │
+                          │ Execute draw     │
+                          │ Generate result  │
+                          └────────┬─────────┘
+                                   │
+                                   ▼
+                            ┌─────────────┐
+                            │    KAFKA    │
+                            │ Event Bus   │
+                            └──────┬──────┘
+                                   │
+                ┌──────────────────┼───────────────────┐
+                │                  │                   │
+                ▼                  ▼                   ▼
+       ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
+       │ WINNER SERVICE │ │ NOTIFICATION   │ │ REPORTING      │
+       │                │ │ SERVICE        │ │ SERVICE        │
+       │ Winners        │ │ Email/SMS      │ │ Reports        │
+       │ Claims         │ │ Notifications  │ │ Analytics      │
+       └───────┬────────┘ └────────────────┘ └────────────────┘
+               │
+               ▼
+        ┌──────────────┐
+        │  winner_db   │
+        └──────────────┘
+
+
+                 ┌─────────────────────────────┐
+                 │       AUDIT SERVICE         │
+                 │                             │
+                 │ Every important operation   │
+                 └──────────────┬──────────────┘
+                                │
+                                ▼
+                           audit_db
+```
+
+---
+
+# 2. Microservice responsibilities
+
+We don't want overlapping responsibilities.
+
+### Auth Service
+
+Owns:
+
+```text
+User
+Role
+Permission
+Authentication
+JWT
+Refresh Token
+Password
+```
+
+It answers:
+
+> "Who is this user and what are they allowed to do?"
+
+---
+
+### Lottery Service
+
+Owns:
+
+```text
+Lottery
+Lottery Rules
+Prize Tier
+Lottery Schedule
+Lottery Status
+```
+
+It answers:
+
+> "What lottery exists and what are its rules?"
+
+---
+
+### Ticket Service
+
+Owns:
+
+```text
+Ticket
+Ticket Purchase
+Ticket Cancellation
+Ticket Status
+```
+
+It answers:
+
+> "Which tickets have been issued?"
+
+---
+
+### Draw Service
+
+Owns:
+
+```text
+Draw
+Draw Schedule
+Draw Execution
+Winning Numbers
+```
+
+It answers:
+
+> "What draw happened and what was its result?"
+
+---
+
+### Winner Service
+
+Owns:
+
+```text
+Winner
+Prize
+Claim
+Settlement
+```
+
+It answers:
+
+> "Who won and what happened to the prize?"
+
+---
+
+### Notification Service
+
+Owns:
+
+```text
+Email
+SMS
+Push notification
+Notification history
+```
+
+It answers:
+
+> "Who needs to be notified?"
+
+---
+
+### Reporting Service
+
+Owns:
+
+```text
+Sales reports
+Ticket reports
+Lottery reports
+Winner reports
+Agent reports
+Financial summaries
+```
+
+---
+
+### Audit Service
+
+Owns:
+
+```text
+Who
+What
+When
+Which resource
+Old value
+New value
+IP/device information where appropriate
+```
+
+This is especially important for administrative operations.
+
+---
+
+# 3. Database-per-service
+
+This is a major microservice principle.
+
+Don't do this:
+
+```text
+                    ┌──────────────┐
+                    │   MySQL      │
+                    │              │
+                    │ ALL TABLES   │
+                    └──────────────┘
+                      ▲ ▲ ▲ ▲ ▲
+                      │ │ │ │ │
+                     all services
+```
+
+Instead:
+
+```text
+Auth Service
+     │
+     ▼
+ auth_db
+
+Lottery Service
+     │
+     ▼
+ lottery_db
+
+Ticket Service
+     │
+     ▼
+ ticket_db
+
+Draw Service
+     │
+     ▼
+ draw_db
+
+Winner Service
+     │
+     ▼
+ winner_db
+```
+
+This prevents one service from directly modifying another service's data.
+
+---
+
+# 4. How services communicate
+
+There will be **two types of communication**.
+
+## Synchronous — REST
+
+Use REST when the caller needs an immediate answer.
+
+Example:
+
+```text
+Frontend
+   │
+   ▼
+Gateway
+   │
+   ▼
+Lottery Service
+   │
+   ▼
+Response
+```
+
+For example:
+
+```http
+GET /api/lotteries/LOT-001
+```
+
+---
+
+## Asynchronous — Kafka
+
+Use Kafka when something has happened and other services need to react.
+
+Example:
+
+```text
+Ticket Service
+      │
+      │ TicketPurchasedEvent
+      ▼
+    Kafka
+      │
+      ├──────► Notification
+      │
+      ├──────► Reporting
+      │
+      └──────► Audit
+```
+
+The Ticket Service doesn't wait for all three services.
+
+That's the key difference.
+
+---
+
+# 5. Ticket purchase flow
+
+This is one of our most important workflows.
+
+```text
+Customer
+   │
+   │ POST /tickets
+   ▼
+API Gateway
+   │
+   ▼
+Ticket Service
+   │
+   ├── Validate user
+   │
+   ├── Validate lottery
+   │
+   ├── Check sales period
+   │
+   ├── Check ticket availability
+   │
+   ├── Process payment
+   │
+   ├── Generate ticket
+   │
+   └── Save ticket
+          │
+          ▼
+      TicketPurchasedEvent
+          │
+          ▼
+        Kafka
+       /  |   \
+      /   |    \
+     ▼    ▼     ▼
+Notification Report Audit
+```
+
+---
+
+# 6. Draw flow
+
+At draw time:
+
+```text
+              Scheduler
+                  │
+                  ▼
+            Draw Service
+                  │
+                  ▼
+          Validate lottery
+                  │
+                  ▼
+          Close ticket sales
+                  │
+                  ▼
+          Execute draw
+                  │
+                  ▼
+          Save draw result
+                  │
+                  ▼
+          DrawCompletedEvent
+                  │
+                  ▼
+                Kafka
+                  │
+        ┌─────────┼─────────┐
+        ▼         ▼         ▼
+     Winner    Report    Notification
+     Service   Service      Service
+```
+
+---
+
+# 7. Important: don't let Draw Service modify Ticket DB
+
+Bad architecture:
+
+```text
+Draw Service
+     │
+     └──────► ticket_db
+```
+
+Good architecture:
+
+```text
+Draw Service
+     │
+     ▼
+Ticket Service API
+```
+
+or preferably through an event/contract appropriate to the operation.
+
+Each service owns its data.
+
+---
+
+# 8. API Gateway responsibilities
+
+The Gateway will handle things like:
+
+```text
+Routing
+Authentication filtering
+Rate limiting
+CORS
+Request correlation ID
+Centralized logging
+```
+
+Example routes:
+
+```text
+/api/auth/**       → auth-service
+
+/api/lotteries/**  → lottery-service
+
+/api/tickets/**    → ticket-service
+
+/api/draws/**      → draw-service
+
+/api/winners/**    → winner-service
+```
+
+---
+
+# 9. JWT security architecture
+
+The flow will be:
+
+```text
+                   Login
+                     │
+                     ▼
+              ┌─────────────┐
+              │Auth Service │
+              └──────┬──────┘
+                     │
+                     ▼
+                  JWT
+                     │
+                     ▼
+                React App
+                     │
+                     │ Bearer Token
+                     ▼
+               API Gateway
+                     │
+                     ▼
+              Microservice
+```
+
+We'll validate the token at the gateway and enforce authorization at the service level too.
+
+Why both?
+
+Because relying exclusively on the gateway is dangerous.
+
+A service should still protect itself.
+
+---
+
+# 10. Example authorization
+
+Admin:
+
+```http
+POST /api/lotteries
+```
+
+allowed.
+
+Customer:
+
+```http
+POST /api/lotteries
+```
+
+should receive:
+
+```text
+403 FORBIDDEN
+```
+
+Agent:
+
+```http
+POST /api/tickets
+```
+
+allowed.
+
+---
+
+# 11. Kafka event architecture
+
+We'll define event contracts.
+
+Example:
+
+```json
+{
+  "eventId": "EVT-001",
+  "eventType": "TICKET_PURCHASED",
+  "timestamp": "2026-10-08T10:30:00Z",
+  "version": 1,
+  "payload": {
+    "ticketId": "TKT-001",
+    "lotteryId": "LOT-001",
+    "customerId": "CUS-001",
+    "amount": 100
+  }
+}
+```
+
+We'll eventually discuss:
+
+* event versioning
+* idempotency
+* retries
+* dead-letter topics
+* ordering
+* consumer groups
+
+These are important interview-level microservice concepts.
+
+---
+
+# 12. Redis
+
+We'll introduce Redis later for:
+
+```text
+JWT/session-related supporting data
+Rate limiting
+Frequently accessed lottery information
+Temporary ticket locks
+Caching
+```
+
+Example:
+
+```text
+GET /api/lotteries/LOT-001
+
+       │
+       ▼
+     Redis
+       │
+    cache hit?
+     /    \
+   YES     NO
+    │       │
+    ▼       ▼
+ response Lottery DB
+```
+
+But we won't blindly cache everything.
+
+Caching data that changes frequently can create consistency problems.
+
+---
+
+# 13. Handling duplicate ticket purchases
+
+This is a real-world problem.
+
+Imagine two requests arrive simultaneously:
+
+```text
+Request A ─┐
+           ├── Ticket number A
+Request B ─┘
+```
+
+We need to prevent duplicate issuance.
+
+We'll use a combination of:
+
+```text
+Database constraints
+Transactions
+Idempotency keys
+Proper locking where necessary
+```
+
+For example:
+
+```http
+POST /api/tickets
+
+Idempotency-Key: 5d8c9...
+```
+
+If the same request is submitted twice, the system shouldn't create two tickets.
+
+---
+
+# 14. Distributed transaction problem
+
+Suppose:
+
+```text
+Ticket Service
+     ↓
+Payment
+     ↓
+Ticket created
+     ↓
+Kafka event
+```
+
+What happens if payment succeeds but ticket creation fails?
+
+Or:
+
+```text
+Ticket created
+     ↓
+Kafka unavailable
+```
+
+We need to handle these failures.
+
+We'll eventually use patterns such as:
+
+### Transactional Outbox
+
+```text
+Ticket DB
+ ┌──────────────────────┐
+ │ tickets              │
+ │ outbox_events        │
+ └──────────┬───────────┘
+            │
+            ▼
+       Kafka Publisher
+            │
+            ▼
+          Kafka
+```
+
+This is much more reliable than:
+
+```java
+saveTicket();
+kafka.send();
+```
+
+and assuming both always succeed.
+
+---
+
+# 15. Audit architecture
+
+For important operations:
+
+```text
+Admin
+  │
+  ▼
+Lottery Service
+  │
+  ├── update lottery
+  │
+  └── Audit Event
+           │
+           ▼
+     Audit Service
+```
+
+Example audit record:
+
+```text
+User: admin123
+
+Action:
+LOTTERY_UPDATED
+
+Resource:
+LOT-001
+
+Before:
+Ticket Price = ₹100
+
+After:
+Ticket Price = ₹150
+
+Timestamp:
+2026-10-08 10:45:22
+```
+
+---
+
+# 16. Failure handling
+
+We'll explicitly design for failure.
+
+Example:
+
+```text
+Ticket Service
+      │
+      ▼
+Kafka unavailable
+```
+
+We shouldn't lose the event.
+
+The Outbox pattern will help.
+
+Another:
+
+```text
+Notification Service DOWN
+```
+
+Ticket purchase should **not necessarily fail** just because email service is unavailable.
+
+That's why asynchronous communication is useful.
+
+---
+
+# 17. Observability architecture
+
+Eventually:
+
+```text
+                  Services
+                     │
+                     ▼
+               OpenTelemetry
+                     │
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+       Metrics      Logs      Traces
+          │          │          │
+          ▼          ▼          ▼
+    Prometheus    Logging     Tempo/
+          │                    Jaeger
+          ▼
+       Grafana
+```
+
+Then we can see:
+
+```text
+Ticket purchase latency
+Kafka consumer lag
+Failed requests
+Database errors
+CPU/memory
+API response time
+```
+
+---
+
+# 18. Repository structure
+
+We'll start with a **monorepo**.
+
+That's easier for learning and initial development.
+
+```text
+lottery-management-system/
+│
+├── services/
+│   │
+│   ├── api-gateway/
+│   │
+│   ├── auth-service/
+│   │
+│   ├── lottery-service/
+│   │
+│   ├── ticket-service/
+│   │
+│   ├── draw-service/
+│   │
+│   ├── winner-service/
+│   │
+│   ├── notification-service/
+│   │
+│   ├── reporting-service/
+│   │
+│   └── audit-service/
+│
+├── frontend/
+│
+├── infrastructure/
+│   ├── docker/
+│   ├── kafka/
+│   ├── mysql/
+│   ├── redis/
+│   └── kubernetes/
+│
+├── docs/
+│   ├── architecture/
+│   ├── api/
+│   ├── database/
+│   └── diagrams/
+│
+├── docker-compose.yml
+│
+└── README.md
+```
+
+---
+
+# 19. Development order
+
+Don't build all nine services immediately.
+
+We'll actually implement them in this order:
+
+```text
+                    START
+                      │
+                      ▼
+              API Gateway
+                      │
+                      ▼
+               Auth Service
+                      │
+                      ▼
+             Lottery Service
+                      │
+                      ▼
+              Ticket Service
+                      │
+                      ▼
+               Draw Service
+                      │
+                      ▼
+             Winner Service
+                      │
+                      ▼
+                    Kafka
+                      │
+             ┌────────┴────────┐
+             ▼                 ▼
+      Notification          Reporting
+             │
+             ▼
+           Audit
+```
+
+This gives us a working system at every major stage.
+
+---
+
+# 20. Technology versions
+
+Our initial baseline:
+
+```text
+Java             25 LTS
+Spring Boot      4.1.x
+Spring Cloud     2025.1.3
+Maven             3.9+
+MySQL             9.7 LTS
+Redis             8.x
+Kafka             current stable
+React             current stable
+TypeScript        current stable
+Docker            current stable
+Kubernetes        current stable
+```
+
+We'll pin exact versions in the project when we create it rather than using floating versions like:
+
+```xml
+<version>LATEST</version>
+```
+
+Never do that in a serious project.
+
+---
+
+# Next: Step 3 — Database Design
+
+Now we're ready for the **database design**, which is where we should slow down rather than rushing into Java.
+
+I'll design:
+
+```text
+1. auth_db
+   ├── users
+   ├── roles
+   ├── permissions
+   └── refresh_tokens
+
+2. lottery_db
+   ├── lotteries
+   ├── prize_tiers
+   ├── lottery_rules
+   └── lottery_schedules
+
+3. ticket_db
+   ├── tickets
+   ├── ticket_transactions
+   └── ticket_cancellations
+
+4. draw_db
+   ├── draws
+   ├── winning_numbers
+   └── draw_results
+
+5. winner_db
+   ├── winners
+   ├── prize_claims
+   └── settlements
+
+6. audit_db
+   └── audit_events
+```
+
+Then I'll give you the **actual MySQL table structure, primary keys, foreign-key strategy, indexes, constraints, and ER diagram**, followed by the corresponding JPA entities.
+
+That is the right point to start writing our first Java code.
+

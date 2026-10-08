@@ -1,0 +1,1115 @@
+# Step 3 — Database Design
+
+We'll use **MySQL with one database per microservice**.
+
+The most important rule:
+
+> **A microservice owns its database. Another service must never directly query or modify that database.**
+
+For example, `ticket-service` can store `lottery_id`, but it must not create a MySQL foreign key into `lottery_db`.
+
+---
+
+# 1. Database architecture
+
+We'll start with six databases:
+
+```text
+lottery_system
+│
+├── auth_db
+├── lottery_db
+├── ticket_db
+├── draw_db
+├── winner_db
+└── audit_db
+```
+
+Later, reporting can have its own read-optimized database.
+
+---
+
+# 2. AUTH DATABASE
+
+## Tables
+
+```text
+auth_db
+│
+├── users
+├── roles
+├── permissions
+├── user_roles
+├── role_permissions
+└── refresh_tokens
+```
+
+---
+
+## `users`
+
+```sql
+CREATE TABLE users (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    phone VARCHAR(20),
+    status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP
+);
+```
+
+Status:
+
+```text
+ACTIVE
+INACTIVE
+LOCKED
+DELETED
+```
+
+We don't delete users physically unless there's a strong reason.
+
+---
+
+## `roles`
+
+```sql
+CREATE TABLE roles (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(50) NOT NULL UNIQUE,
+    description VARCHAR(255),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+Initial roles:
+
+```text
+ADMIN
+AGENT
+CUSTOMER
+AUDITOR
+```
+
+---
+
+## `permissions`
+
+```sql
+CREATE TABLE permissions (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(100) NOT NULL UNIQUE,
+    description VARCHAR(255)
+);
+```
+
+Examples:
+
+```text
+LOTTERY_CREATE
+LOTTERY_UPDATE
+LOTTERY_VIEW
+TICKET_CREATE
+TICKET_VIEW
+TICKET_CANCEL
+DRAW_EXECUTE
+WINNER_VIEW
+REPORT_VIEW
+AUDIT_VIEW
+```
+
+---
+
+## `user_roles`
+
+```sql
+CREATE TABLE user_roles (
+    user_id BIGINT NOT NULL,
+    role_id BIGINT NOT NULL,
+
+    PRIMARY KEY (user_id, role_id),
+
+    CONSTRAINT fk_user_roles_user
+        FOREIGN KEY (user_id) REFERENCES users(id),
+
+    CONSTRAINT fk_user_roles_role
+        FOREIGN KEY (role_id) REFERENCES roles(id)
+);
+```
+
+---
+
+## `role_permissions`
+
+```sql
+CREATE TABLE role_permissions (
+    role_id BIGINT NOT NULL,
+    permission_id BIGINT NOT NULL,
+
+    PRIMARY KEY (role_id, permission_id),
+
+    CONSTRAINT fk_role_permissions_role
+        FOREIGN KEY (role_id) REFERENCES roles(id),
+
+    CONSTRAINT fk_role_permissions_permission
+        FOREIGN KEY (permission_id) REFERENCES permissions(id)
+);
+```
+
+So:
+
+```text
+USER
+  ↓
+ROLE
+  ↓
+PERMISSION
+```
+
+Example:
+
+```text
+Nigamananda
+    ↓
+ADMIN
+    ↓
+LOTTERY_CREATE
+LOTTERY_UPDATE
+DRAW_EXECUTE
+REPORT_VIEW
+```
+
+---
+
+# 3. LOTTERY DATABASE
+
+```text
+lottery_db
+│
+├── lotteries
+├── prize_tiers
+├── lottery_rules
+└── lottery_schedules
+```
+
+---
+
+# 4. `lotteries`
+
+```sql
+CREATE TABLE lotteries (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    lottery_code VARCHAR(50) NOT NULL UNIQUE,
+    name VARCHAR(150) NOT NULL,
+
+    description TEXT,
+
+    ticket_price DECIMAL(12,2) NOT NULL,
+
+    currency VARCHAR(3) NOT NULL DEFAULT 'INR',
+
+    status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+
+    sales_start_at DATETIME NOT NULL,
+    sales_end_at DATETIME NOT NULL,
+    draw_at DATETIME NOT NULL,
+
+    max_tickets BIGINT,
+
+    created_by BIGINT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_ticket_price
+        CHECK (ticket_price > 0),
+
+    CONSTRAINT chk_lottery_dates
+        CHECK (
+            sales_start_at < sales_end_at
+            AND sales_end_at <= draw_at
+        )
+);
+```
+
+Notice:
+
+```text
+created_by BIGINT
+```
+
+There is **no foreign key to `auth_db.users`**.
+
+Why?
+
+Because `auth_db` belongs to another microservice.
+
+We'll store the user ID as a logical reference.
+
+---
+
+# 5. Lottery status
+
+We'll use:
+
+```text
+DRAFT
+SCHEDULED
+ACTIVE
+SALES_CLOSED
+DRAW_PENDING
+DRAW_COMPLETED
+SETTLED
+CANCELLED
+```
+
+We'll enforce legal transitions in Java.
+
+For example:
+
+```text
+DRAFT
+ ↓
+SCHEDULED
+ ↓
+ACTIVE
+ ↓
+SALES_CLOSED
+ ↓
+DRAW_PENDING
+ ↓
+DRAW_COMPLETED
+ ↓
+SETTLED
+```
+
+We should **not** let an API client arbitrarily change:
+
+```text
+SETTLED → ACTIVE
+```
+
+---
+
+# 6. `prize_tiers`
+
+```sql
+CREATE TABLE prize_tiers (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    lottery_id BIGINT NOT NULL,
+
+    tier_number INT NOT NULL,
+
+    tier_name VARCHAR(100) NOT NULL,
+
+    prize_amount DECIMAL(15,2) NOT NULL,
+
+    winner_count INT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_lottery_tier
+        UNIQUE (lottery_id, tier_number),
+
+    CONSTRAINT chk_prize_amount
+        CHECK (prize_amount >= 0),
+
+    CONSTRAINT chk_winner_count
+        CHECK (winner_count > 0)
+);
+```
+
+Notice again:
+
+```text
+lottery_id
+```
+
+is not a foreign key.
+
+It is owned by the Lottery Service.
+
+---
+
+# 7. Example prize configuration
+
+```text
+lottery_id = 1
+
+tier 1 → ₹10,00,000 → 1 winner
+tier 2 → ₹1,00,000  → 5 winners
+tier 3 → ₹10,000    → 50 winners
+tier 4 → ₹1,000     → 500 winners
+```
+
+This gives us flexibility.
+
+We don't need Java code like:
+
+```java
+if (tier == 1) {
+    prize = 1000000;
+}
+```
+
+That's bad design.
+
+---
+
+# 8. `lottery_rules`
+
+```sql
+CREATE TABLE lottery_rules (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    lottery_id BIGINT NOT NULL UNIQUE,
+
+    number_count INT NOT NULL,
+
+    min_number INT NOT NULL,
+
+    max_number INT NOT NULL,
+
+    allow_multiple_winners BOOLEAN NOT NULL DEFAULT TRUE,
+
+    allow_ticket_cancellation BOOLEAN NOT NULL DEFAULT FALSE,
+
+    cancellation_cutoff_minutes INT,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP
+);
+```
+
+For example:
+
+```text
+Number count: 6
+Min number: 1
+Max number: 49
+```
+
+This allows us to support different lottery formats later.
+
+---
+
+# 9. `lottery_schedules`
+
+We shouldn't assume every lottery is a one-time event.
+
+```sql
+CREATE TABLE lottery_schedules (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    lottery_id BIGINT NOT NULL,
+
+    schedule_type VARCHAR(30) NOT NULL,
+
+    draw_time TIME,
+
+    day_of_week INT,
+
+    timezone VARCHAR(50) NOT NULL DEFAULT 'Asia/Kolkata',
+
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+Possible schedule:
+
+```text
+WEEKLY
+Sunday
+20:00
+Asia/Kolkata
+```
+
+---
+
+# 10. TICKET DATABASE
+
+```text
+ticket_db
+│
+├── tickets
+├── ticket_transactions
+└── ticket_cancellations
+```
+
+---
+
+# 11. `tickets`
+
+```sql
+CREATE TABLE tickets (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    ticket_id VARCHAR(50) NOT NULL UNIQUE,
+
+    lottery_id BIGINT NOT NULL,
+
+    customer_id BIGINT,
+
+    agent_id BIGINT,
+
+    ticket_number VARCHAR(100) NOT NULL,
+
+    price DECIMAL(12,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL,
+
+    purchase_reference VARCHAR(100),
+
+    purchased_at DATETIME NOT NULL,
+
+    issued_at DATETIME,
+
+    cancelled_at DATETIME,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_lottery_ticket_number
+        UNIQUE (lottery_id, ticket_number),
+
+    INDEX idx_ticket_lottery (lottery_id),
+
+    INDEX idx_ticket_customer (customer_id),
+
+    INDEX idx_ticket_agent (agent_id),
+
+    INDEX idx_ticket_status (status)
+);
+```
+
+Important:
+
+```sql
+UNIQUE (lottery_id, ticket_number)
+```
+
+This prevents the same ticket number from being issued twice within a lottery.
+
+---
+
+# 12. Ticket status
+
+```text
+CREATED
+PAYMENT_PENDING
+PAID
+ISSUED
+CANCELLED
+DRAWN
+WINNER
+NON_WINNER
+```
+
+We'll probably simplify some of these later after designing the payment workflow.
+
+---
+
+# 13. `ticket_transactions`
+
+Every financial movement should have a transaction record.
+
+```sql
+CREATE TABLE ticket_transactions (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    ticket_id BIGINT NOT NULL,
+
+    transaction_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    transaction_type VARCHAR(30) NOT NULL,
+
+    amount DECIMAL(12,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL,
+
+    payment_method VARCHAR(30),
+
+    external_reference VARCHAR(150),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_ticket_transaction_ticket (ticket_id)
+);
+```
+
+Example:
+
+```text
+PURCHASE
+REFUND
+CANCELLATION
+PRIZE_PAYMENT
+```
+
+---
+
+# 14. `ticket_cancellations`
+
+```sql
+CREATE TABLE ticket_cancellations (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    ticket_id BIGINT NOT NULL UNIQUE,
+
+    reason VARCHAR(500),
+
+    cancelled_by BIGINT NOT NULL,
+
+    refund_amount DECIMAL(12,2),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+Again:
+
+```text
+cancelled_by
+```
+
+is logically a user ID.
+
+No cross-database FK.
+
+---
+
+# 15. DRAW DATABASE
+
+```text
+draw_db
+│
+├── draws
+├── winning_numbers
+└── draw_results
+```
+
+---
+
+# 16. `draws`
+
+```sql
+CREATE TABLE draws (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    draw_id VARCHAR(50) NOT NULL UNIQUE,
+
+    lottery_id BIGINT NOT NULL,
+
+    scheduled_at DATETIME NOT NULL,
+
+    started_at DATETIME,
+
+    completed_at DATETIME,
+
+    status VARCHAR(30) NOT NULL,
+
+    execution_reference VARCHAR(150),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    INDEX idx_draw_lottery (lottery_id),
+
+    INDEX idx_draw_status (status)
+);
+```
+
+---
+
+# 17. `winning_numbers`
+
+```sql
+CREATE TABLE winning_numbers (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    draw_id BIGINT NOT NULL,
+
+    sequence_number INT NOT NULL,
+
+    winning_number INT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_draw_sequence
+        UNIQUE (draw_id, sequence_number),
+
+    CONSTRAINT uq_draw_number
+        UNIQUE (draw_id, winning_number)
+);
+```
+
+Example:
+
+```text
+Draw: DRAW-001
+
+Sequence    Number
+------------------
+1           04
+2           11
+3           17
+4           23
+5           31
+6           42
+```
+
+---
+
+# 18. `draw_results`
+
+```sql
+CREATE TABLE draw_results (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    draw_id BIGINT NOT NULL UNIQUE,
+
+    result_hash VARCHAR(255),
+
+    verification_status VARCHAR(30),
+
+    published_at DATETIME,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+The hash can later be used as part of a stronger result-integrity/audit mechanism.
+
+---
+
+# 19. WINNER DATABASE
+
+```text
+winner_db
+│
+├── winners
+├── prize_claims
+└── settlements
+```
+
+---
+
+# 20. `winners`
+
+```sql
+CREATE TABLE winners (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    winner_id VARCHAR(50) NOT NULL UNIQUE,
+
+    draw_id BIGINT NOT NULL,
+
+    ticket_id BIGINT NOT NULL,
+
+    lottery_id BIGINT NOT NULL,
+
+    customer_id BIGINT,
+
+    prize_tier_id BIGINT,
+
+    prize_amount DECIMAL(15,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'DECLARED',
+
+    declared_at DATETIME NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_winner_draw (draw_id),
+
+    INDEX idx_winner_ticket (ticket_id),
+
+    INDEX idx_winner_customer (customer_id)
+);
+```
+
+---
+
+# 21. `prize_claims`
+
+```sql
+CREATE TABLE prize_claims (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    winner_id BIGINT NOT NULL UNIQUE,
+
+    claim_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+
+    claimed_at DATETIME,
+
+    verified_at DATETIME,
+
+    verified_by BIGINT,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP
+);
+```
+
+Status:
+
+```text
+PENDING
+SUBMITTED
+UNDER_REVIEW
+APPROVED
+REJECTED
+PAID
+```
+
+---
+
+# 22. `settlements`
+
+```sql
+CREATE TABLE settlements (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    winner_id BIGINT NOT NULL,
+
+    settlement_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    amount DECIMAL(15,2) NOT NULL,
+
+    payment_method VARCHAR(30),
+
+    status VARCHAR(30) NOT NULL,
+
+    external_reference VARCHAR(150),
+
+    settled_at DATETIME,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+# 23. AUDIT DATABASE
+
+This one is extremely important.
+
+```sql
+CREATE TABLE audit_events (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    event_id VARCHAR(100) NOT NULL UNIQUE,
+
+    service_name VARCHAR(100) NOT NULL,
+
+    user_id BIGINT,
+
+    action VARCHAR(100) NOT NULL,
+
+    resource_type VARCHAR(100),
+
+    resource_id VARCHAR(100),
+
+    old_value JSON,
+
+    new_value JSON,
+
+    ip_address VARCHAR(45),
+
+    correlation_id VARCHAR(100),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_audit_user (user_id),
+
+    INDEX idx_audit_resource (resource_type, resource_id),
+
+    INDEX idx_audit_created (created_at)
+);
+```
+
+For example:
+
+```text
+ADMIN
+   │
+   ▼
+Changed ticket price
+   │
+   ▼
+Audit Event
+
+old_value:
+₹100
+
+new_value:
+₹150
+```
+
+---
+
+# 24. Overall ER relationship
+
+Logically our system looks like:
+
+```text
+                 AUTH DB
+                   │
+            ┌──────┴──────┐
+            │             │
+          USER           ROLE
+            │
+            │
+            ▼
+      ┌─────────────┐
+      │   LOTTERY   │
+      └──────┬──────┘
+             │
+       ┌─────┴──────┐
+       │            │
+       ▼            ▼
+ PRIZE_TIER    LOTTERY_RULE
+       │
+       │
+       ▼
+     TICKET
+       │
+       │
+       ▼
+     DRAW
+       │
+       ▼
+    WINNER
+       │
+       ▼
+  PRIZE_CLAIM
+       │
+       ▼
+  SETTLEMENT
+```
+
+But physically these tables live in different databases.
+
+---
+
+# 25. Why we don't use cross-database foreign keys
+
+Suppose:
+
+```text
+ticket_db.tickets.lottery_id
+```
+
+references:
+
+```text
+lottery_db.lotteries.id
+```
+
+That creates tight coupling.
+
+Instead:
+
+```text
+ticket_db
+tickets
+-----------------
+lottery_id = 1001
+```
+
+The Ticket Service can ask:
+
+```http
+GET /api/lotteries/1001
+```
+
+when it needs lottery information.
+
+This gives us independent services.
+
+---
+
+# 26. Indexing strategy
+
+We're not going to blindly put indexes on every column.
+
+Important indexes include:
+
+```text
+lottery_code
+lottery status
+lottery dates
+
+ticket_id
+lottery_id
+customer_id
+agent_id
+ticket status
+
+draw_id
+lottery_id
+draw status
+
+winner_id
+ticket_id
+customer_id
+
+audit resource
+audit user
+audit timestamp
+```
+
+Indexes improve reads but make writes more expensive and consume storage.
+
+---
+
+# 27. Database migrations
+
+Don't manually execute these SQL scripts every time.
+
+We'll use:
+
+**Flyway**
+
+Our service will eventually look like:
+
+```text
+lottery-service/
+│
+├── src/
+│   └── main/
+│       ├── java/
+│       └── resources/
+│           ├── application.yml
+│           └── db/
+│               └── migration/
+│                   ├── V1__create_lotteries.sql
+│                   ├── V2__create_prize_tiers.sql
+│                   ├── V3__create_lottery_rules.sql
+│                   └── V4__create_schedules.sql
+```
+
+Flyway maintains the migration history.
+
+---
+
+# 28. One important improvement
+
+I don't want us to rush into creating JPA entities for every table yet.
+
+First we'll define the **API contracts and domain boundaries**.
+
+Otherwise we can end up with anemic entities and services that simply do:
+
+```text
+Controller
+    ↓
+Service
+    ↓
+Repository
+    ↓
+Database
+```
+
+without real business logic.
+
+Our goal is:
+
+```text
+HTTP
+ ↓
+Controller
+ ↓
+Application Service
+ ↓
+Domain/business rules
+ ↓
+Repository
+ ↓
+Database
+```
+
+---
+
+# 29. Our first actual coding milestone
+
+Now we're ready to create the project.
+
+We'll start with only **three services**:
+
+```text
+lottery-management-system/
+│
+├── api-gateway
+├── auth-service
+└── lottery-service
+```
+
+Then we'll get:
+
+```text
+Java 25
+   ↓
+Spring Boot
+   ↓
+MySQL
+   ↓
+Flyway
+   ↓
+JPA
+   ↓
+REST API
+   ↓
+JWT Security
+```
+
+working end-to-end.
+
+After that we'll add Ticket Service.
+
+---
+
+# Next — Step 4: Create the Spring Boot project
+
+In the next step I'll give you the **exact project creation instructions**, including:
+
+```text
+1. Maven parent project
+2. api-gateway pom.xml
+3. auth-service pom.xml
+4. lottery-service pom.xml
+5. Complete folder structure
+6. application.yml
+7. MySQL Docker configuration
+8. Flyway configuration
+9. First Lottery entity
+10. Repository
+11. Service
+12. Controller
+13. First REST API
+14. Postman test
+```
+
+We'll actually start writing **real Java/Spring Boot code** at that point.

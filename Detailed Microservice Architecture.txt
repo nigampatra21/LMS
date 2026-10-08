@@ -1,0 +1,965 @@
+# Step 2 — Detailed Microservice Architecture
+
+Now we move from requirements to the **actual technical architecture**.
+
+The goal is to make this something you could put on GitHub and explain in a senior Java/Spring Boot interview.
+
+---
+
+## 1. Final architecture
+
+```text
+                         ┌─────────────────────┐
+                         │      CUSTOMER       │
+                         │       AGENT         │
+                         │       ADMIN         │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │   React Frontend    │
+                         │   TypeScript        │
+                         └──────────┬──────────┘
+                                    │ HTTPS
+                                    ▼
+                         ┌─────────────────────┐
+                         │     API GATEWAY     │
+                         │ Spring Cloud        │
+                         │ Gateway             │
+                         └──────────┬──────────┘
+                                    │
+          ┌─────────────────────────┼─────────────────────────┐
+          │                         │                         │
+          ▼                         ▼                         ▼
+ ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
+ │  AUTH SERVICE   │       │ LOTTERY SERVICE │       │ TICKET SERVICE  │
+ │                 │       │                 │       │                 │
+ │ Login           │       │ Lottery CRUD    │       │ Ticket purchase │
+ │ Register        │       │ Prize config    │       │ Ticket search   │
+ │ JWT             │       │ Schedule        │       │ Cancellation    │
+ │ Users/Roles     │       │ Status          │       │ Ticket status   │
+ └────────┬────────┘       └────────┬────────┘       └────────┬────────┘
+          │                         │                         │
+          ▼                         ▼                         ▼
+     ┌─────────┐              ┌───────────┐             ┌───────────┐
+     │ auth_db │              │ lottery_db│             │ ticket_db │
+     └─────────┘              └───────────┘             └───────────┘
+
+                                    │
+                                    ▼
+                          ┌──────────────────┐
+                          │   DRAW SERVICE   │
+                          │                  │
+                          │ Schedule draw    │
+                          │ Execute draw     │
+                          │ Generate result  │
+                          └────────┬─────────┘
+                                   │
+                                   ▼
+                            ┌─────────────┐
+                            │    KAFKA    │
+                            │ Event Bus   │
+                            └──────┬──────┘
+                                   │
+                ┌──────────────────┼───────────────────┐
+                │                  │                   │
+                ▼                  ▼                   ▼
+       ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
+       │ WINNER SERVICE │ │ NOTIFICATION   │ │ REPORTING      │
+       │                │ │ SERVICE        │ │ SERVICE        │
+       │ Winners        │ │ Email/SMS      │ │ Reports        │
+       │ Claims         │ │ Notifications  │ │ Analytics      │
+       └───────┬────────┘ └────────────────┘ └────────────────┘
+               │
+               ▼
+        ┌──────────────┐
+        │  winner_db   │
+        └──────────────┘
+
+
+                 ┌─────────────────────────────┐
+                 │       AUDIT SERVICE         │
+                 │                             │
+                 │ Every important operation   │
+                 └──────────────┬──────────────┘
+                                │
+                                ▼
+                           audit_db
+```
+
+---
+
+# 2. Microservice responsibilities
+
+We don't want overlapping responsibilities.
+
+### Auth Service
+
+Owns:
+
+```text
+User
+Role
+Permission
+Authentication
+JWT
+Refresh Token
+Password
+```
+
+It answers:
+
+> "Who is this user and what are they allowed to do?"
+
+---
+
+### Lottery Service
+
+Owns:
+
+```text
+Lottery
+Lottery Rules
+Prize Tier
+Lottery Schedule
+Lottery Status
+```
+
+It answers:
+
+> "What lottery exists and what are its rules?"
+
+---
+
+### Ticket Service
+
+Owns:
+
+```text
+Ticket
+Ticket Purchase
+Ticket Cancellation
+Ticket Status
+```
+
+It answers:
+
+> "Which tickets have been issued?"
+
+---
+
+### Draw Service
+
+Owns:
+
+```text
+Draw
+Draw Schedule
+Draw Execution
+Winning Numbers
+```
+
+It answers:
+
+> "What draw happened and what was its result?"
+
+---
+
+### Winner Service
+
+Owns:
+
+```text
+Winner
+Prize
+Claim
+Settlement
+```
+
+It answers:
+
+> "Who won and what happened to the prize?"
+
+---
+
+### Notification Service
+
+Owns:
+
+```text
+Email
+SMS
+Push notification
+Notification history
+```
+
+It answers:
+
+> "Who needs to be notified?"
+
+---
+
+### Reporting Service
+
+Owns:
+
+```text
+Sales reports
+Ticket reports
+Lottery reports
+Winner reports
+Agent reports
+Financial summaries
+```
+
+---
+
+### Audit Service
+
+Owns:
+
+```text
+Who
+What
+When
+Which resource
+Old value
+New value
+IP/device information where appropriate
+```
+
+This is especially important for administrative operations.
+
+---
+
+# 3. Database-per-service
+
+This is a major microservice principle.
+
+Don't do this:
+
+```text
+                    ┌──────────────┐
+                    │   MySQL      │
+                    │              │
+                    │ ALL TABLES   │
+                    └──────────────┘
+                      ▲ ▲ ▲ ▲ ▲
+                      │ │ │ │ │
+                     all services
+```
+
+Instead:
+
+```text
+Auth Service
+     │
+     ▼
+ auth_db
+
+Lottery Service
+     │
+     ▼
+ lottery_db
+
+Ticket Service
+     │
+     ▼
+ ticket_db
+
+Draw Service
+     │
+     ▼
+ draw_db
+
+Winner Service
+     │
+     ▼
+ winner_db
+```
+
+This prevents one service from directly modifying another service's data.
+
+---
+
+# 4. How services communicate
+
+There will be **two types of communication**.
+
+## Synchronous — REST
+
+Use REST when the caller needs an immediate answer.
+
+Example:
+
+```text
+Frontend
+   │
+   ▼
+Gateway
+   │
+   ▼
+Lottery Service
+   │
+   ▼
+Response
+```
+
+For example:
+
+```http
+GET /api/lotteries/LOT-001
+```
+
+---
+
+## Asynchronous — Kafka
+
+Use Kafka when something has happened and other services need to react.
+
+Example:
+
+```text
+Ticket Service
+      │
+      │ TicketPurchasedEvent
+      ▼
+    Kafka
+      │
+      ├──────► Notification
+      │
+      ├──────► Reporting
+      │
+      └──────► Audit
+```
+
+The Ticket Service doesn't wait for all three services.
+
+That's the key difference.
+
+---
+
+# 5. Ticket purchase flow
+
+This is one of our most important workflows.
+
+```text
+Customer
+   │
+   │ POST /tickets
+   ▼
+API Gateway
+   │
+   ▼
+Ticket Service
+   │
+   ├── Validate user
+   │
+   ├── Validate lottery
+   │
+   ├── Check sales period
+   │
+   ├── Check ticket availability
+   │
+   ├── Process payment
+   │
+   ├── Generate ticket
+   │
+   └── Save ticket
+          │
+          ▼
+      TicketPurchasedEvent
+          │
+          ▼
+        Kafka
+       /  |   \
+      /   |    \
+     ▼    ▼     ▼
+Notification Report Audit
+```
+
+---
+
+# 6. Draw flow
+
+At draw time:
+
+```text
+              Scheduler
+                  │
+                  ▼
+            Draw Service
+                  │
+                  ▼
+          Validate lottery
+                  │
+                  ▼
+          Close ticket sales
+                  │
+                  ▼
+          Execute draw
+                  │
+                  ▼
+          Save draw result
+                  │
+                  ▼
+          DrawCompletedEvent
+                  │
+                  ▼
+                Kafka
+                  │
+        ┌─────────┼─────────┐
+        ▼         ▼         ▼
+     Winner    Report    Notification
+     Service   Service      Service
+```
+
+---
+
+# 7. Important: don't let Draw Service modify Ticket DB
+
+Bad architecture:
+
+```text
+Draw Service
+     │
+     └──────► ticket_db
+```
+
+Good architecture:
+
+```text
+Draw Service
+     │
+     ▼
+Ticket Service API
+```
+
+or preferably through an event/contract appropriate to the operation.
+
+Each service owns its data.
+
+---
+
+# 8. API Gateway responsibilities
+
+The Gateway will handle things like:
+
+```text
+Routing
+Authentication filtering
+Rate limiting
+CORS
+Request correlation ID
+Centralized logging
+```
+
+Example routes:
+
+```text
+/api/auth/**       → auth-service
+
+/api/lotteries/**  → lottery-service
+
+/api/tickets/**    → ticket-service
+
+/api/draws/**      → draw-service
+
+/api/winners/**    → winner-service
+```
+
+---
+
+# 9. JWT security architecture
+
+The flow will be:
+
+```text
+                   Login
+                     │
+                     ▼
+              ┌─────────────┐
+              │Auth Service │
+              └──────┬──────┘
+                     │
+                     ▼
+                  JWT
+                     │
+                     ▼
+                React App
+                     │
+                     │ Bearer Token
+                     ▼
+               API Gateway
+                     │
+                     ▼
+              Microservice
+```
+
+We'll validate the token at the gateway and enforce authorization at the service level too.
+
+Why both?
+
+Because relying exclusively on the gateway is dangerous.
+
+A service should still protect itself.
+
+---
+
+# 10. Example authorization
+
+Admin:
+
+```http
+POST /api/lotteries
+```
+
+allowed.
+
+Customer:
+
+```http
+POST /api/lotteries
+```
+
+should receive:
+
+```text
+403 FORBIDDEN
+```
+
+Agent:
+
+```http
+POST /api/tickets
+```
+
+allowed.
+
+---
+
+# 11. Kafka event architecture
+
+We'll define event contracts.
+
+Example:
+
+```json
+{
+  "eventId": "EVT-001",
+  "eventType": "TICKET_PURCHASED",
+  "timestamp": "2026-10-08T10:30:00Z",
+  "version": 1,
+  "payload": {
+    "ticketId": "TKT-001",
+    "lotteryId": "LOT-001",
+    "customerId": "CUS-001",
+    "amount": 100
+  }
+}
+```
+
+We'll eventually discuss:
+
+* event versioning
+* idempotency
+* retries
+* dead-letter topics
+* ordering
+* consumer groups
+
+These are important interview-level microservice concepts.
+
+---
+
+# 12. Redis
+
+We'll introduce Redis later for:
+
+```text
+JWT/session-related supporting data
+Rate limiting
+Frequently accessed lottery information
+Temporary ticket locks
+Caching
+```
+
+Example:
+
+```text
+GET /api/lotteries/LOT-001
+
+       │
+       ▼
+     Redis
+       │
+    cache hit?
+     /    \
+   YES     NO
+    │       │
+    ▼       ▼
+ response Lottery DB
+```
+
+But we won't blindly cache everything.
+
+Caching data that changes frequently can create consistency problems.
+
+---
+
+# 13. Handling duplicate ticket purchases
+
+This is a real-world problem.
+
+Imagine two requests arrive simultaneously:
+
+```text
+Request A ─┐
+           ├── Ticket number A
+Request B ─┘
+```
+
+We need to prevent duplicate issuance.
+
+We'll use a combination of:
+
+```text
+Database constraints
+Transactions
+Idempotency keys
+Proper locking where necessary
+```
+
+For example:
+
+```http
+POST /api/tickets
+
+Idempotency-Key: 5d8c9...
+```
+
+If the same request is submitted twice, the system shouldn't create two tickets.
+
+---
+
+# 14. Distributed transaction problem
+
+Suppose:
+
+```text
+Ticket Service
+     ↓
+Payment
+     ↓
+Ticket created
+     ↓
+Kafka event
+```
+
+What happens if payment succeeds but ticket creation fails?
+
+Or:
+
+```text
+Ticket created
+     ↓
+Kafka unavailable
+```
+
+We need to handle these failures.
+
+We'll eventually use patterns such as:
+
+### Transactional Outbox
+
+```text
+Ticket DB
+ ┌──────────────────────┐
+ │ tickets              │
+ │ outbox_events        │
+ └──────────┬───────────┘
+            │
+            ▼
+       Kafka Publisher
+            │
+            ▼
+          Kafka
+```
+
+This is much more reliable than:
+
+```java
+saveTicket();
+kafka.send();
+```
+
+and assuming both always succeed.
+
+---
+
+# 15. Audit architecture
+
+For important operations:
+
+```text
+Admin
+  │
+  ▼
+Lottery Service
+  │
+  ├── update lottery
+  │
+  └── Audit Event
+           │
+           ▼
+     Audit Service
+```
+
+Example audit record:
+
+```text
+User: admin123
+
+Action:
+LOTTERY_UPDATED
+
+Resource:
+LOT-001
+
+Before:
+Ticket Price = ₹100
+
+After:
+Ticket Price = ₹150
+
+Timestamp:
+2026-10-08 10:45:22
+```
+
+---
+
+# 16. Failure handling
+
+We'll explicitly design for failure.
+
+Example:
+
+```text
+Ticket Service
+      │
+      ▼
+Kafka unavailable
+```
+
+We shouldn't lose the event.
+
+The Outbox pattern will help.
+
+Another:
+
+```text
+Notification Service DOWN
+```
+
+Ticket purchase should **not necessarily fail** just because email service is unavailable.
+
+That's why asynchronous communication is useful.
+
+---
+
+# 17. Observability architecture
+
+Eventually:
+
+```text
+                  Services
+                     │
+                     ▼
+               OpenTelemetry
+                     │
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+       Metrics      Logs      Traces
+          │          │          │
+          ▼          ▼          ▼
+    Prometheus    Logging     Tempo/
+          │                    Jaeger
+          ▼
+       Grafana
+```
+
+Then we can see:
+
+```text
+Ticket purchase latency
+Kafka consumer lag
+Failed requests
+Database errors
+CPU/memory
+API response time
+```
+
+---
+
+# 18. Repository structure
+
+We'll start with a **monorepo**.
+
+That's easier for learning and initial development.
+
+```text
+lottery-management-system/
+│
+├── services/
+│   │
+│   ├── api-gateway/
+│   │
+│   ├── auth-service/
+│   │
+│   ├── lottery-service/
+│   │
+│   ├── ticket-service/
+│   │
+│   ├── draw-service/
+│   │
+│   ├── winner-service/
+│   │
+│   ├── notification-service/
+│   │
+│   ├── reporting-service/
+│   │
+│   └── audit-service/
+│
+├── frontend/
+│
+├── infrastructure/
+│   ├── docker/
+│   ├── kafka/
+│   ├── mysql/
+│   ├── redis/
+│   └── kubernetes/
+│
+├── docs/
+│   ├── architecture/
+│   ├── api/
+│   ├── database/
+│   └── diagrams/
+│
+├── docker-compose.yml
+│
+└── README.md
+```
+
+---
+
+# 19. Development order
+
+Don't build all nine services immediately.
+
+We'll actually implement them in this order:
+
+```text
+                    START
+                      │
+                      ▼
+              API Gateway
+                      │
+                      ▼
+               Auth Service
+                      │
+                      ▼
+             Lottery Service
+                      │
+                      ▼
+              Ticket Service
+                      │
+                      ▼
+               Draw Service
+                      │
+                      ▼
+             Winner Service
+                      │
+                      ▼
+                    Kafka
+                      │
+             ┌────────┴────────┐
+             ▼                 ▼
+      Notification          Reporting
+             │
+             ▼
+           Audit
+```
+
+This gives us a working system at every major stage.
+
+---
+
+# 20. Technology versions
+
+Our initial baseline:
+
+```text
+Java             25 LTS
+Spring Boot      4.1.x
+Spring Cloud     2025.1.3
+Maven             3.9+
+MySQL             9.7 LTS
+Redis             8.x
+Kafka             current stable
+React             current stable
+TypeScript        current stable
+Docker            current stable
+Kubernetes        current stable
+```
+
+We'll pin exact versions in the project when we create it rather than using floating versions like:
+
+```xml
+<version>LATEST</version>
+```
+
+Never do that in a serious project.
+
+---
+
+# Next: Step 3 — Database Design
+
+Now we're ready for the **database design**, which is where we should slow down rather than rushing into Java.
+
+I'll design:
+
+```text
+1. auth_db
+   ├── users
+   ├── roles
+   ├── permissions
+   └── refresh_tokens
+
+2. lottery_db
+   ├── lotteries
+   ├── prize_tiers
+   ├── lottery_rules
+   └── lottery_schedules
+
+3. ticket_db
+   ├── tickets
+   ├── ticket_transactions
+   └── ticket_cancellations
+
+4. draw_db
+   ├── draws
+   ├── winning_numbers
+   └── draw_results
+
+5. winner_db
+   ├── winners
+   ├── prize_claims
+   └── settlements
+
+6. audit_db
+   └── audit_events
+```
+
+Then I'll give you the **actual MySQL table structure, primary keys, foreign-key strategy, indexes, constraints, and ER diagram**, followed by the corresponding JPA entities.
+
+That is the right point to start writing our first Java code.
