@@ -1,0 +1,5308 @@
+Detailed Microservice Architecture
+Now we move from requirements to the actual technical architecture.
+
+The goal is to make this something you could put on GitHub and explain in a senior Java/Spring Boot interview.
+
+1. Final architecture
+                         ┌─────────────────────┐
+                         │      CUSTOMER       │
+                         │       AGENT         │
+                         │       ADMIN         │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │   React Frontend    │
+                         │   TypeScript        │
+                         └──────────┬──────────┘
+                                    │ HTTPS
+                                    ▼
+                         ┌─────────────────────┐
+                         │     API GATEWAY     │
+                         │ Spring Cloud        │
+                         │ Gateway             │
+                         └──────────┬──────────┘
+                                    │
+          ┌─────────────────────────┼─────────────────────────┐
+          │                         │                         │
+          ▼                         ▼                         ▼
+ ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
+ │  AUTH SERVICE   │       │ LOTTERY SERVICE │       │ TICKET SERVICE  │
+ │                 │       │                 │       │                 │
+ │ Login           │       │ Lottery CRUD    │       │ Ticket purchase │
+ │ Register        │       │ Prize config    │       │ Ticket search   │
+ │ JWT             │       │ Schedule        │       │ Cancellation    │
+ │ Users/Roles     │       │ Status          │       │ Ticket status   │
+ └────────┬────────┘       └────────┬────────┘       └────────┬────────┘
+          │                         │                         │
+          ▼                         ▼                         ▼
+     ┌─────────┐              ┌───────────┐             ┌───────────┐
+     │ auth_db │              │ lottery_db│             │ ticket_db │
+     └─────────┘              └───────────┘             └───────────┘
+
+                                    │
+                                    ▼
+                          ┌──────────────────┐
+                          │   DRAW SERVICE   │
+                          │                  │
+                          │ Schedule draw    │
+                          │ Execute draw     │
+                          │ Generate result  │
+                          └────────┬─────────┘
+                                   │
+                                   ▼
+                            ┌─────────────┐
+                            │    KAFKA    │
+                            │ Event Bus   │
+                            └──────┬──────┘
+                                   │
+                ┌──────────────────┼───────────────────┐
+                │                  │                   │
+                ▼                  ▼                   ▼
+       ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
+       │ WINNER SERVICE │ │ NOTIFICATION   │ │ REPORTING      │
+       │                │ │ SERVICE        │ │ SERVICE        │
+       │ Winners        │ │ Email/SMS      │ │ Reports        │
+       │ Claims         │ │ Notifications  │ │ Analytics      │
+       └───────┬────────┘ └────────────────┘ └────────────────┘
+               │
+               ▼
+        ┌──────────────┐
+        │  winner_db   │
+        └──────────────┘
+
+
+                 ┌─────────────────────────────┐
+                 │       AUDIT SERVICE         │
+                 │                             │
+                 │ Every important operation   │
+                 └──────────────┬──────────────┘
+                                │
+                                ▼
+                           audit_db
+2. Microservice responsibilities
+We don't want overlapping responsibilities.
+
+Auth Service
+Owns:
+
+User
+Role
+Permission
+Authentication
+JWT
+Refresh Token
+Password
+It answers:
+
+"Who is this user and what are they allowed to do?"
+
+Lottery Service
+Owns:
+
+Lottery
+Lottery Rules
+Prize Tier
+Lottery Schedule
+Lottery Status
+It answers:
+
+"What lottery exists and what are its rules?"
+
+Ticket Service
+Owns:
+
+Ticket
+Ticket Purchase
+Ticket Cancellation
+Ticket Status
+It answers:
+
+"Which tickets have been issued?"
+
+Draw Service
+Owns:
+
+Draw
+Draw Schedule
+Draw Execution
+Winning Numbers
+It answers:
+
+"What draw happened and what was its result?"
+
+Winner Service
+Owns:
+
+Winner
+Prize
+Claim
+Settlement
+It answers:
+
+"Who won and what happened to the prize?"
+
+Notification Service
+Owns:
+
+Email
+SMS
+Push notification
+Notification history
+It answers:
+
+"Who needs to be notified?"
+
+Reporting Service
+Owns:
+
+Sales reports
+Ticket reports
+Lottery reports
+Winner reports
+Agent reports
+Financial summaries
+Audit Service
+Owns:
+
+Who
+What
+When
+Which resource
+Old value
+New value
+IP/device information where appropriate
+This is especially important for administrative operations.
+
+3. Database-per-service
+This is a major microservice principle.
+
+Don't do this:
+
+                    ┌──────────────┐
+                    │   MySQL      │
+                    │              │
+                    │ ALL TABLES   │
+                    └──────────────┘
+                      ▲ ▲ ▲ ▲ ▲
+                      │ │ │ │ │
+                     all services
+Instead:
+
+Auth Service
+     │
+     ▼
+ auth_db
+
+Lottery Service
+     │
+     ▼
+ lottery_db
+
+Ticket Service
+     │
+     ▼
+ ticket_db
+
+Draw Service
+     │
+     ▼
+ draw_db
+
+Winner Service
+     │
+     ▼
+ winner_db
+This prevents one service from directly modifying another service's data.
+
+4. How services communicate
+There will be two types of communication.
+
+Synchronous — REST
+Use REST when the caller needs an immediate answer.
+
+Example:
+
+Frontend
+   │
+   ▼
+Gateway
+   │
+   ▼
+Lottery Service
+   │
+   ▼
+Response
+For example:
+
+GET /api/lotteries/LOT-001
+Asynchronous — Kafka
+Use Kafka when something has happened and other services need to react.
+
+Example:
+
+Ticket Service
+      │
+      │ TicketPurchasedEvent
+      ▼
+    Kafka
+      │
+      ├──────► Notification
+      │
+      ├──────► Reporting
+      │
+      └──────► Audit
+The Ticket Service doesn't wait for all three services.
+
+That's the key difference.
+
+5. Ticket purchase flow
+This is one of our most important workflows.
+
+Customer
+   │
+   │ POST /tickets
+   ▼
+API Gateway
+   │
+   ▼
+Ticket Service
+   │
+   ├── Validate user
+   │
+   ├── Validate lottery
+   │
+   ├── Check sales period
+   │
+   ├── Check ticket availability
+   │
+   ├── Process payment
+   │
+   ├── Generate ticket
+   │
+   └── Save ticket
+          │
+          ▼
+      TicketPurchasedEvent
+          │
+          ▼
+        Kafka
+       /  |   \
+      /   |    \
+     ▼    ▼     ▼
+Notification Report Audit
+6. Draw flow
+At draw time:
+
+              Scheduler
+                  │
+                  ▼
+            Draw Service
+                  │
+                  ▼
+          Validate lottery
+                  │
+                  ▼
+          Close ticket sales
+                  │
+                  ▼
+          Execute draw
+                  │
+                  ▼
+          Save draw result
+                  │
+                  ▼
+          DrawCompletedEvent
+                  │
+                  ▼
+                Kafka
+                  │
+        ┌─────────┼─────────┐
+        ▼         ▼         ▼
+     Winner    Report    Notification
+     Service   Service      Service
+7. Important: don't let Draw Service modify Ticket DB
+Bad architecture:
+
+Draw Service
+     │
+     └──────► ticket_db
+Good architecture:
+
+Draw Service
+     │
+     ▼
+Ticket Service API
+or preferably through an event/contract appropriate to the operation.
+
+Each service owns its data.
+
+8. API Gateway responsibilities
+The Gateway will handle things like:
+
+Routing
+Authentication filtering
+Rate limiting
+CORS
+Request correlation ID
+Centralized logging
+Example routes:
+
+/api/auth/**       → auth-service
+
+/api/lotteries/**  → lottery-service
+
+/api/tickets/**    → ticket-service
+
+/api/draws/**      → draw-service
+
+/api/winners/**    → winner-service
+9. JWT security architecture
+The flow will be:
+
+                   Login
+                     │
+                     ▼
+              ┌─────────────┐
+              │Auth Service │
+              └──────┬──────┘
+                     │
+                     ▼
+                  JWT
+                     │
+                     ▼
+                React App
+                     │
+                     │ Bearer Token
+                     ▼
+               API Gateway
+                     │
+                     ▼
+              Microservice
+We'll validate the token at the gateway and enforce authorization at the service level too.
+
+Why both?
+
+Because relying exclusively on the gateway is dangerous.
+
+A service should still protect itself.
+
+10. Example authorization
+Admin:
+
+POST /api/lotteries
+allowed.
+
+Customer:
+
+POST /api/lotteries
+should receive:
+
+403 FORBIDDEN
+Agent:
+
+POST /api/tickets
+allowed.
+
+11. Kafka event architecture
+We'll define event contracts.
+
+Example:
+
+{
+  "eventId": "EVT-001",
+  "eventType": "TICKET_PURCHASED",
+  "timestamp": "2026-10-08T10:30:00Z",
+  "version": 1,
+  "payload": {
+    "ticketId": "TKT-001",
+    "lotteryId": "LOT-001",
+    "customerId": "CUS-001",
+    "amount": 100
+  }
+}
+We'll eventually discuss:
+
+event versioning
+idempotency
+retries
+dead-letter topics
+ordering
+consumer groups
+These are important interview-level microservice concepts.
+
+12. Redis
+We'll introduce Redis later for:
+
+JWT/session-related supporting data
+Rate limiting
+Frequently accessed lottery information
+Temporary ticket locks
+Caching
+Example:
+
+GET /api/lotteries/LOT-001
+
+       │
+       ▼
+     Redis
+       │
+    cache hit?
+     /    \
+   YES     NO
+    │       │
+    ▼       ▼
+ response Lottery DB
+But we won't blindly cache everything.
+
+Caching data that changes frequently can create consistency problems.
+
+13. Handling duplicate ticket purchases
+This is a real-world problem.
+
+Imagine two requests arrive simultaneously:
+
+Request A ─┐
+           ├── Ticket number A
+Request B ─┘
+We need to prevent duplicate issuance.
+
+We'll use a combination of:
+
+Database constraints
+Transactions
+Idempotency keys
+Proper locking where necessary
+For example:
+
+POST /api/tickets
+
+Idempotency-Key: 5d8c9...
+If the same request is submitted twice, the system shouldn't create two tickets.
+
+14. Distributed transaction problem
+Suppose:
+
+Ticket Service
+     ↓
+Payment
+     ↓
+Ticket created
+     ↓
+Kafka event
+What happens if payment succeeds but ticket creation fails?
+
+Or:
+
+Ticket created
+     ↓
+Kafka unavailable
+We need to handle these failures.
+
+We'll eventually use patterns such as:
+
+Transactional Outbox
+Ticket DB
+ ┌──────────────────────┐
+ │ tickets              │
+ │ outbox_events        │
+ └──────────┬───────────┘
+            │
+            ▼
+       Kafka Publisher
+            │
+            ▼
+          Kafka
+This is much more reliable than:
+
+saveTicket();
+kafka.send();
+and assuming both always succeed.
+
+15. Audit architecture
+For important operations:
+
+Admin
+  │
+  ▼
+Lottery Service
+  │
+  ├── update lottery
+  │
+  └── Audit Event
+           │
+           ▼
+     Audit Service
+Example audit record:
+
+User: admin123
+
+Action:
+LOTTERY_UPDATED
+
+Resource:
+LOT-001
+
+Before:
+Ticket Price = ₹100
+
+After:
+Ticket Price = ₹150
+
+Timestamp:
+2026-10-08 10:45:22
+16. Failure handling
+We'll explicitly design for failure.
+
+Example:
+
+Ticket Service
+      │
+      ▼
+Kafka unavailable
+We shouldn't lose the event.
+
+The Outbox pattern will help.
+
+Another:
+
+Notification Service DOWN
+Ticket purchase should not necessarily fail just because email service is unavailable.
+
+That's why asynchronous communication is useful.
+
+17. Observability architecture
+Eventually:
+
+                  Services
+                     │
+                     ▼
+               OpenTelemetry
+                     │
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+       Metrics      Logs      Traces
+          │          │          │
+          ▼          ▼          ▼
+    Prometheus    Logging     Tempo/
+          │                    Jaeger
+          ▼
+       Grafana
+Then we can see:
+
+Ticket purchase latency
+Kafka consumer lag
+Failed requests
+Database errors
+CPU/memory
+API response time
+18. Repository structure
+We'll start with a monorepo.
+
+That's easier for learning and initial development.
+
+lottery-management-system/
+│
+├── services/
+│   │
+│   ├── api-gateway/
+│   │
+│   ├── auth-service/
+│   │
+│   ├── lottery-service/
+│   │
+│   ├── ticket-service/
+│   │
+│   ├── draw-service/
+│   │
+│   ├── winner-service/
+│   │
+│   ├── notification-service/
+│   │
+│   ├── reporting-service/
+│   │
+│   └── audit-service/
+│
+├── frontend/
+│
+├── infrastructure/
+│   ├── docker/
+│   ├── kafka/
+│   ├── mysql/
+│   ├── redis/
+│   └── kubernetes/
+│
+├── docs/
+│   ├── architecture/
+│   ├── api/
+│   ├── database/
+│   └── diagrams/
+│
+├── docker-compose.yml
+│
+└── README.md
+19. Development order
+Don't build all nine services immediately.
+
+We'll actually implement them in this order:
+
+                    START
+                      │
+                      ▼
+              API Gateway
+                      │
+                      ▼
+               Auth Service
+                      │
+                      ▼
+             Lottery Service
+                      │
+                      ▼
+              Ticket Service
+                      │
+                      ▼
+               Draw Service
+                      │
+                      ▼
+             Winner Service
+                      │
+                      ▼
+                    Kafka
+                      │
+             ┌────────┴────────┐
+             ▼                 ▼
+      Notification          Reporting
+             │
+             ▼
+           Audit
+This gives us a working system at every major stage.
+
+20. Technology versions
+Our initial baseline:
+
+Java             25 LTS
+Spring Boot      4.1.x
+Spring Cloud     2025.1.3
+Maven             3.9+
+MySQL             9.7 LTS
+Redis             8.x
+Kafka             current stable
+React             current stable
+TypeScript        current stable
+Docker            current stable
+Kubernetes        current stable
+We'll pin exact versions in the project when we create it rather than using floating versions like:
+
+<version>LATEST</version>
+Never do that in a serious project.
+
+Next: Step 3 — Database Design
+Now we're ready for the database design, which is where we should slow down rather than rushing into Java.
+
+I'll design:
+
+1. auth_db
+   ├── users
+   ├── roles
+   ├── permissions
+   └── refresh_tokens
+
+2. lottery_db
+   ├── lotteries
+   ├── prize_tiers
+   ├── lottery_rules
+   └── lottery_schedules
+
+3. ticket_db
+   ├── tickets
+   ├── ticket_transactions
+   └── ticket_cancellations
+
+4. draw_db
+   ├── draws
+   ├── winning_numbers
+   └── draw_results
+
+5. winner_db
+   ├── winners
+   ├── prize_claims
+   └── settlements
+
+6. audit_db
+   └── audit_events
+Then I'll give you the actual MySQL table structure, primary keys, foreign-key strategy, indexes, constraints, and ER diagram, followed by the corresponding JPA entities.
+
+That is the right point to start writing our first Java code.
+
+yes
+Step 3 — Database Design
+We'll use MySQL with one database per microservice.
+
+The most important rule:
+
+A microservice owns its database. Another service must never directly query or modify that database.
+
+For example, ticket-service can store lottery_id, but it must not create a MySQL foreign key into lottery_db.
+
+1. Database architecture
+We'll start with six databases:
+
+lottery_system
+│
+├── auth_db
+├── lottery_db
+├── ticket_db
+├── draw_db
+├── winner_db
+└── audit_db
+Later, reporting can have its own read-optimized database.
+
+2. AUTH DATABASE
+Tables
+auth_db
+│
+├── users
+├── roles
+├── permissions
+├── user_roles
+├── role_permissions
+└── refresh_tokens
+users
+CREATE TABLE users (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    phone VARCHAR(20),
+    status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP
+);
+Status:
+
+ACTIVE
+INACTIVE
+LOCKED
+DELETED
+We don't delete users physically unless there's a strong reason.
+
+roles
+CREATE TABLE roles (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(50) NOT NULL UNIQUE,
+    description VARCHAR(255),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+Initial roles:
+
+ADMIN
+AGENT
+CUSTOMER
+AUDITOR
+permissions
+CREATE TABLE permissions (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(100) NOT NULL UNIQUE,
+    description VARCHAR(255)
+);
+Examples:
+
+LOTTERY_CREATE
+LOTTERY_UPDATE
+LOTTERY_VIEW
+TICKET_CREATE
+TICKET_VIEW
+TICKET_CANCEL
+DRAW_EXECUTE
+WINNER_VIEW
+REPORT_VIEW
+AUDIT_VIEW
+user_roles
+CREATE TABLE user_roles (
+    user_id BIGINT NOT NULL,
+    role_id BIGINT NOT NULL,
+
+    PRIMARY KEY (user_id, role_id),
+
+    CONSTRAINT fk_user_roles_user
+        FOREIGN KEY (user_id) REFERENCES users(id),
+
+    CONSTRAINT fk_user_roles_role
+        FOREIGN KEY (role_id) REFERENCES roles(id)
+);
+role_permissions
+CREATE TABLE role_permissions (
+    role_id BIGINT NOT NULL,
+    permission_id BIGINT NOT NULL,
+
+    PRIMARY KEY (role_id, permission_id),
+
+    CONSTRAINT fk_role_permissions_role
+        FOREIGN KEY (role_id) REFERENCES roles(id),
+
+    CONSTRAINT fk_role_permissions_permission
+        FOREIGN KEY (permission_id) REFERENCES permissions(id)
+);
+So:
+
+USER
+  ↓
+ROLE
+  ↓
+PERMISSION
+Example:
+
+Nigamananda
+    ↓
+ADMIN
+    ↓
+LOTTERY_CREATE
+LOTTERY_UPDATE
+DRAW_EXECUTE
+REPORT_VIEW
+3. LOTTERY DATABASE
+lottery_db
+│
+├── lotteries
+├── prize_tiers
+├── lottery_rules
+└── lottery_schedules
+4. lotteries
+CREATE TABLE lotteries (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    lottery_code VARCHAR(50) NOT NULL UNIQUE,
+    name VARCHAR(150) NOT NULL,
+
+    description TEXT,
+
+    ticket_price DECIMAL(12,2) NOT NULL,
+
+    currency VARCHAR(3) NOT NULL DEFAULT 'INR',
+
+    status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+
+    sales_start_at DATETIME NOT NULL,
+    sales_end_at DATETIME NOT NULL,
+    draw_at DATETIME NOT NULL,
+
+    max_tickets BIGINT,
+
+    created_by BIGINT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_ticket_price
+        CHECK (ticket_price > 0),
+
+    CONSTRAINT chk_lottery_dates
+        CHECK (
+            sales_start_at < sales_end_at
+            AND sales_end_at <= draw_at
+        )
+);
+Notice:
+
+created_by BIGINT
+There is no foreign key to auth_db.users.
+
+Why?
+
+Because auth_db belongs to another microservice.
+
+We'll store the user ID as a logical reference.
+
+5. Lottery status
+We'll use:
+
+DRAFT
+SCHEDULED
+ACTIVE
+SALES_CLOSED
+DRAW_PENDING
+DRAW_COMPLETED
+SETTLED
+CANCELLED
+We'll enforce legal transitions in Java.
+
+For example:
+
+DRAFT
+ ↓
+SCHEDULED
+ ↓
+ACTIVE
+ ↓
+SALES_CLOSED
+ ↓
+DRAW_PENDING
+ ↓
+DRAW_COMPLETED
+ ↓
+SETTLED
+We should not let an API client arbitrarily change:
+
+SETTLED → ACTIVE
+6. prize_tiers
+CREATE TABLE prize_tiers (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    lottery_id BIGINT NOT NULL,
+
+    tier_number INT NOT NULL,
+
+    tier_name VARCHAR(100) NOT NULL,
+
+    prize_amount DECIMAL(15,2) NOT NULL,
+
+    winner_count INT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_lottery_tier
+        UNIQUE (lottery_id, tier_number),
+
+    CONSTRAINT chk_prize_amount
+        CHECK (prize_amount >= 0),
+
+    CONSTRAINT chk_winner_count
+        CHECK (winner_count > 0)
+);
+Notice again:
+
+lottery_id
+is not a foreign key.
+
+It is owned by the Lottery Service.
+
+7. Example prize configuration
+lottery_id = 1
+
+tier 1 → ₹10,00,000 → 1 winner
+tier 2 → ₹1,00,000  → 5 winners
+tier 3 → ₹10,000    → 50 winners
+tier 4 → ₹1,000     → 500 winners
+This gives us flexibility.
+
+We don't need Java code like:
+
+if (tier == 1) {
+    prize = 1000000;
+}
+That's bad design.
+
+8. lottery_rules
+CREATE TABLE lottery_rules (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    lottery_id BIGINT NOT NULL UNIQUE,
+
+    number_count INT NOT NULL,
+
+    min_number INT NOT NULL,
+
+    max_number INT NOT NULL,
+
+    allow_multiple_winners BOOLEAN NOT NULL DEFAULT TRUE,
+
+    allow_ticket_cancellation BOOLEAN NOT NULL DEFAULT FALSE,
+
+    cancellation_cutoff_minutes INT,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP
+);
+For example:
+
+Number count: 6
+Min number: 1
+Max number: 49
+This allows us to support different lottery formats later.
+
+9. lottery_schedules
+We shouldn't assume every lottery is a one-time event.
+
+CREATE TABLE lottery_schedules (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    lottery_id BIGINT NOT NULL,
+
+    schedule_type VARCHAR(30) NOT NULL,
+
+    draw_time TIME,
+
+    day_of_week INT,
+
+    timezone VARCHAR(50) NOT NULL DEFAULT 'Asia/Kolkata',
+
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+Possible schedule:
+
+WEEKLY
+Sunday
+20:00
+Asia/Kolkata
+10. TICKET DATABASE
+ticket_db
+│
+├── tickets
+├── ticket_transactions
+└── ticket_cancellations
+11. tickets
+CREATE TABLE tickets (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    ticket_id VARCHAR(50) NOT NULL UNIQUE,
+
+    lottery_id BIGINT NOT NULL,
+
+    customer_id BIGINT,
+
+    agent_id BIGINT,
+
+    ticket_number VARCHAR(100) NOT NULL,
+
+    price DECIMAL(12,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL,
+
+    purchase_reference VARCHAR(100),
+
+    purchased_at DATETIME NOT NULL,
+
+    issued_at DATETIME,
+
+    cancelled_at DATETIME,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_lottery_ticket_number
+        UNIQUE (lottery_id, ticket_number),
+
+    INDEX idx_ticket_lottery (lottery_id),
+
+    INDEX idx_ticket_customer (customer_id),
+
+    INDEX idx_ticket_agent (agent_id),
+
+    INDEX idx_ticket_status (status)
+);
+Important:
+
+UNIQUE (lottery_id, ticket_number)
+This prevents the same ticket number from being issued twice within a lottery.
+
+12. Ticket status
+CREATED
+PAYMENT_PENDING
+PAID
+ISSUED
+CANCELLED
+DRAWN
+WINNER
+NON_WINNER
+We'll probably simplify some of these later after designing the payment workflow.
+
+13. ticket_transactions
+Every financial movement should have a transaction record.
+
+CREATE TABLE ticket_transactions (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    ticket_id BIGINT NOT NULL,
+
+    transaction_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    transaction_type VARCHAR(30) NOT NULL,
+
+    amount DECIMAL(12,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL,
+
+    payment_method VARCHAR(30),
+
+    external_reference VARCHAR(150),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_ticket_transaction_ticket (ticket_id)
+);
+Example:
+
+PURCHASE
+REFUND
+CANCELLATION
+PRIZE_PAYMENT
+14. ticket_cancellations
+CREATE TABLE ticket_cancellations (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    ticket_id BIGINT NOT NULL UNIQUE,
+
+    reason VARCHAR(500),
+
+    cancelled_by BIGINT NOT NULL,
+
+    refund_amount DECIMAL(12,2),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+Again:
+
+cancelled_by
+is logically a user ID.
+
+No cross-database FK.
+
+15. DRAW DATABASE
+draw_db
+│
+├── draws
+├── winning_numbers
+└── draw_results
+16. draws
+CREATE TABLE draws (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    draw_id VARCHAR(50) NOT NULL UNIQUE,
+
+    lottery_id BIGINT NOT NULL,
+
+    scheduled_at DATETIME NOT NULL,
+
+    started_at DATETIME,
+
+    completed_at DATETIME,
+
+    status VARCHAR(30) NOT NULL,
+
+    execution_reference VARCHAR(150),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    INDEX idx_draw_lottery (lottery_id),
+
+    INDEX idx_draw_status (status)
+);
+17. winning_numbers
+CREATE TABLE winning_numbers (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    draw_id BIGINT NOT NULL,
+
+    sequence_number INT NOT NULL,
+
+    winning_number INT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_draw_sequence
+        UNIQUE (draw_id, sequence_number),
+
+    CONSTRAINT uq_draw_number
+        UNIQUE (draw_id, winning_number)
+);
+Example:
+
+Draw: DRAW-001
+
+Sequence    Number
+------------------
+1           04
+2           11
+3           17
+4           23
+5           31
+6           42
+18. draw_results
+CREATE TABLE draw_results (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    draw_id BIGINT NOT NULL UNIQUE,
+
+    result_hash VARCHAR(255),
+
+    verification_status VARCHAR(30),
+
+    published_at DATETIME,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+The hash can later be used as part of a stronger result-integrity/audit mechanism.
+
+19. WINNER DATABASE
+winner_db
+│
+├── winners
+├── prize_claims
+└── settlements
+20. winners
+CREATE TABLE winners (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    winner_id VARCHAR(50) NOT NULL UNIQUE,
+
+    draw_id BIGINT NOT NULL,
+
+    ticket_id BIGINT NOT NULL,
+
+    lottery_id BIGINT NOT NULL,
+
+    customer_id BIGINT,
+
+    prize_tier_id BIGINT,
+
+    prize_amount DECIMAL(15,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'DECLARED',
+
+    declared_at DATETIME NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_winner_draw (draw_id),
+
+    INDEX idx_winner_ticket (ticket_id),
+
+    INDEX idx_winner_customer (customer_id)
+);
+21. prize_claims
+CREATE TABLE prize_claims (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    winner_id BIGINT NOT NULL UNIQUE,
+
+    claim_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+
+    claimed_at DATETIME,
+
+    verified_at DATETIME,
+
+    verified_by BIGINT,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP
+);
+Status:
+
+PENDING
+SUBMITTED
+UNDER_REVIEW
+APPROVED
+REJECTED
+PAID
+22. settlements
+CREATE TABLE settlements (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    winner_id BIGINT NOT NULL,
+
+    settlement_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    amount DECIMAL(15,2) NOT NULL,
+
+    payment_method VARCHAR(30),
+
+    status VARCHAR(30) NOT NULL,
+
+    external_reference VARCHAR(150),
+
+    settled_at DATETIME,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+23. AUDIT DATABASE
+This one is extremely important.
+
+CREATE TABLE audit_events (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+
+    event_id VARCHAR(100) NOT NULL UNIQUE,
+
+    service_name VARCHAR(100) NOT NULL,
+
+    user_id BIGINT,
+
+    action VARCHAR(100) NOT NULL,
+
+    resource_type VARCHAR(100),
+
+    resource_id VARCHAR(100),
+
+    old_value JSON,
+
+    new_value JSON,
+
+    ip_address VARCHAR(45),
+
+    correlation_id VARCHAR(100),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_audit_user (user_id),
+
+    INDEX idx_audit_resource (resource_type, resource_id),
+
+    INDEX idx_audit_created (created_at)
+);
+For example:
+
+ADMIN
+   │
+   ▼
+Changed ticket price
+   │
+   ▼
+Audit Event
+
+old_value:
+₹100
+
+new_value:
+₹150
+24. Overall ER relationship
+Logically our system looks like:
+
+                 AUTH DB
+                   │
+            ┌──────┴──────┐
+            │             │
+          USER           ROLE
+            │
+            │
+            ▼
+      ┌─────────────┐
+      │   LOTTERY   │
+      └──────┬──────┘
+             │
+       ┌─────┴──────┐
+       │            │
+       ▼            ▼
+ PRIZE_TIER    LOTTERY_RULE
+       │
+       │
+       ▼
+     TICKET
+       │
+       │
+       ▼
+     DRAW
+       │
+       ▼
+    WINNER
+       │
+       ▼
+  PRIZE_CLAIM
+       │
+       ▼
+  SETTLEMENT
+But physically these tables live in different databases.
+
+25. Why we don't use cross-database foreign keys
+Suppose:
+
+ticket_db.tickets.lottery_id
+references:
+
+lottery_db.lotteries.id
+That creates tight coupling.
+
+Instead:
+
+ticket_db
+tickets
+-----------------
+lottery_id = 1001
+The Ticket Service can ask:
+
+GET /api/lotteries/1001
+when it needs lottery information.
+
+This gives us independent services.
+
+26. Indexing strategy
+We're not going to blindly put indexes on every column.
+
+Important indexes include:
+
+lottery_code
+lottery status
+lottery dates
+
+ticket_id
+lottery_id
+customer_id
+agent_id
+ticket status
+
+draw_id
+lottery_id
+draw status
+
+winner_id
+ticket_id
+customer_id
+
+audit resource
+audit user
+audit timestamp
+Indexes improve reads but make writes more expensive and consume storage.
+
+27. Database migrations
+Don't manually execute these SQL scripts every time.
+
+We'll use:
+
+Flyway
+
+Our service will eventually look like:
+
+lottery-service/
+│
+├── src/
+│   └── main/
+│       ├── java/
+│       └── resources/
+│           ├── application.yml
+│           └── db/
+│               └── migration/
+│                   ├── V1__create_lotteries.sql
+│                   ├── V2__create_prize_tiers.sql
+│                   ├── V3__create_lottery_rules.sql
+│                   └── V4__create_schedules.sql
+Flyway maintains the migration history.
+
+28. One important improvement
+I don't want us to rush into creating JPA entities for every table yet.
+
+First we'll define the API contracts and domain boundaries.
+
+Otherwise we can end up with anemic entities and services that simply do:
+
+Controller
+    ↓
+Service
+    ↓
+Repository
+    ↓
+Database
+without real business logic.
+
+Our goal is:
+
+HTTP
+ ↓
+Controller
+ ↓
+Application Service
+ ↓
+Domain/business rules
+ ↓
+Repository
+ ↓
+Database
+29. Our first actual coding milestone
+Now we're ready to create the project.
+
+We'll start with only three services:
+
+lottery-management-system/
+│
+├── api-gateway
+├── auth-service
+└── lottery-service
+Then we'll get:
+
+Java 25
+   ↓
+Spring Boot
+   ↓
+MySQL
+   ↓
+Flyway
+   ↓
+JPA
+   ↓
+REST API
+   ↓
+JWT Security
+working end-to-end.
+
+After that we'll add Ticket Service.
+
+Next — Step 4: Create the Spring Boot project
+In the next step I'll give you the exact project creation instructions, including:
+
+1. Maven parent project
+2. api-gateway pom.xml
+3. auth-service pom.xml
+4. lottery-service pom.xml
+5. Complete folder structure
+6. application.yml
+7. MySQL Docker configuration
+8. Flyway configuration
+9. First Lottery entity
+10. Repository
+11. Service
+12. Controller
+13. First REST API
+14. Postman test
+We'll actually start writing real Java/Spring Boot code at that point.
+
+i am using one db for now mysql can you gude me to creaate table step by step fast
+Yes. For now, one MySQL database is completely fine, especially while you're learning/building the first version. Don't over-engineer this with multiple databases yet.
+
+We'll create one lottery_db and build the tables in dependency order.
+
+Step 1 — Create the database
+Open MySQL Workbench and run:
+
+CREATE DATABASE lottery_db;
+
+USE lottery_db;
+Verify:
+
+SELECT DATABASE();
+Expected:
+
+lottery_db
+Step 2 — Create users
+Run:
+
+CREATE TABLE users (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    phone VARCHAR(20),
+    status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP
+);
+Check:
+
+DESC users;
+Step 3 — Create roles
+CREATE TABLE roles (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE,
+    description VARCHAR(255),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+Insert our initial roles:
+
+INSERT INTO roles (name, description)
+VALUES
+('ADMIN', 'System administrator'),
+('AGENT', 'Lottery ticket agent'),
+('CUSTOMER', 'Lottery customer'),
+('AUDITOR', 'Read-only auditor');
+Check:
+
+SELECT * FROM roles;
+Step 4 — Connect users and roles
+CREATE TABLE user_roles (
+    user_id BIGINT NOT NULL,
+    role_id BIGINT NOT NULL,
+
+    PRIMARY KEY (user_id, role_id),
+
+    CONSTRAINT fk_user_roles_user
+        FOREIGN KEY (user_id)
+        REFERENCES users(id),
+
+    CONSTRAINT fk_user_roles_role
+        FOREIGN KEY (role_id)
+        REFERENCES roles(id)
+);
+Step 5 — Create lotteries
+CREATE TABLE lotteries (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    lottery_code VARCHAR(50) NOT NULL UNIQUE,
+    name VARCHAR(150) NOT NULL,
+    description TEXT,
+
+    ticket_price DECIMAL(12,2) NOT NULL,
+
+    currency VARCHAR(3) NOT NULL DEFAULT 'INR',
+
+    status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+
+    sales_start_at DATETIME NOT NULL,
+    sales_end_at DATETIME NOT NULL,
+    draw_at DATETIME NOT NULL,
+
+    max_tickets BIGINT,
+
+    created_by BIGINT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_ticket_price
+        CHECK (ticket_price > 0),
+
+    CONSTRAINT chk_lottery_dates
+        CHECK (
+            sales_start_at < sales_end_at
+            AND sales_end_at <= draw_at
+        ),
+
+    CONSTRAINT fk_lottery_created_by
+        FOREIGN KEY (created_by)
+        REFERENCES users(id)
+);
+Here we're deliberately using a foreign key because we're currently using one database.
+
+Step 6 — Create prize_tiers
+CREATE TABLE prize_tiers (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    lottery_id BIGINT NOT NULL,
+
+    tier_number INT NOT NULL,
+    tier_name VARCHAR(100) NOT NULL,
+
+    prize_amount DECIMAL(15,2) NOT NULL,
+    winner_count INT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_lottery_tier
+        UNIQUE (lottery_id, tier_number),
+
+    CONSTRAINT chk_prize_amount
+        CHECK (prize_amount >= 0),
+
+    CONSTRAINT chk_winner_count
+        CHECK (winner_count > 0),
+
+    CONSTRAINT fk_prize_lottery
+        FOREIGN KEY (lottery_id)
+        REFERENCES lotteries(id)
+);
+Step 7 — Create lottery_rules
+CREATE TABLE lottery_rules (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    lottery_id BIGINT NOT NULL UNIQUE,
+
+    number_count INT NOT NULL,
+    min_number INT NOT NULL,
+    max_number INT NOT NULL,
+
+    allow_multiple_winners BOOLEAN NOT NULL DEFAULT TRUE,
+
+    allow_ticket_cancellation BOOLEAN NOT NULL DEFAULT FALSE,
+
+    cancellation_cutoff_minutes INT,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_rules_lottery
+        FOREIGN KEY (lottery_id)
+        REFERENCES lotteries(id)
+);
+Step 8 — Create tickets
+CREATE TABLE tickets (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    ticket_id VARCHAR(50) NOT NULL UNIQUE,
+
+    lottery_id BIGINT NOT NULL,
+
+    customer_id BIGINT,
+    agent_id BIGINT,
+
+    ticket_number VARCHAR(100) NOT NULL,
+
+    price DECIMAL(12,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'ISSUED',
+
+    purchased_at DATETIME NOT NULL,
+    issued_at DATETIME,
+
+    cancelled_at DATETIME,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_lottery_ticket_number
+        UNIQUE (lottery_id, ticket_number),
+
+    CONSTRAINT fk_ticket_lottery
+        FOREIGN KEY (lottery_id)
+        REFERENCES lotteries(id),
+
+    CONSTRAINT fk_ticket_customer
+        FOREIGN KEY (customer_id)
+        REFERENCES users(id),
+
+    CONSTRAINT fk_ticket_agent
+        FOREIGN KEY (agent_id)
+        REFERENCES users(id),
+
+    INDEX idx_ticket_lottery (lottery_id),
+    INDEX idx_ticket_customer (customer_id),
+    INDEX idx_ticket_agent (agent_id),
+    INDEX idx_ticket_status (status)
+);
+Step 9 — Create draws
+CREATE TABLE draws (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    draw_id VARCHAR(50) NOT NULL UNIQUE,
+
+    lottery_id BIGINT NOT NULL,
+
+    scheduled_at DATETIME NOT NULL,
+    started_at DATETIME,
+    completed_at DATETIME,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'SCHEDULED',
+
+    execution_reference VARCHAR(150),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_draw_lottery
+        FOREIGN KEY (lottery_id)
+        REFERENCES lotteries(id),
+
+    INDEX idx_draw_lottery (lottery_id),
+    INDEX idx_draw_status (status)
+);
+Step 10 — Create winning_numbers
+CREATE TABLE winning_numbers (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    draw_id BIGINT NOT NULL,
+
+    sequence_number INT NOT NULL,
+    winning_number INT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_draw_sequence
+        UNIQUE (draw_id, sequence_number),
+
+    CONSTRAINT uq_draw_number
+        UNIQUE (draw_id, winning_number),
+
+    CONSTRAINT fk_winning_draw
+        FOREIGN KEY (draw_id)
+        REFERENCES draws(id)
+);
+Step 11 — Create winners
+CREATE TABLE winners (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    winner_id VARCHAR(50) NOT NULL UNIQUE,
+
+    draw_id BIGINT NOT NULL,
+    ticket_id BIGINT NOT NULL,
+    lottery_id BIGINT NOT NULL,
+    customer_id BIGINT,
+
+    prize_tier_id BIGINT,
+
+    prize_amount DECIMAL(15,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'DECLARED',
+
+    declared_at DATETIME NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_winner_draw
+        FOREIGN KEY (draw_id)
+        REFERENCES draws(id),
+
+    CONSTRAINT fk_winner_ticket
+        FOREIGN KEY (ticket_id)
+        REFERENCES tickets(id),
+
+    CONSTRAINT fk_winner_lottery
+        FOREIGN KEY (lottery_id)
+        REFERENCES lotteries(id),
+
+    CONSTRAINT fk_winner_customer
+        FOREIGN KEY (customer_id)
+        REFERENCES users(id),
+
+    CONSTRAINT fk_winner_prize_tier
+        FOREIGN KEY (prize_tier_id)
+        REFERENCES prize_tiers(id)
+);
+Step 12 — Create prize_claims
+CREATE TABLE prize_claims (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    winner_id BIGINT NOT NULL UNIQUE,
+
+    claim_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+
+    claimed_at DATETIME,
+    verified_at DATETIME,
+    verified_by BIGINT,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_claim_winner
+        FOREIGN KEY (winner_id)
+        REFERENCES winners(id),
+
+    CONSTRAINT fk_claim_verified_by
+        FOREIGN KEY (verified_by)
+        REFERENCES users(id)
+);
+Step 13 — Create ticket transactions
+CREATE TABLE ticket_transactions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    ticket_id BIGINT NOT NULL,
+
+    transaction_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    transaction_type VARCHAR(30) NOT NULL,
+
+    amount DECIMAL(12,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL,
+
+    payment_method VARCHAR(30),
+
+    external_reference VARCHAR(150),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_transaction_ticket
+        FOREIGN KEY (ticket_id)
+        REFERENCES tickets(id),
+
+    INDEX idx_transaction_ticket (ticket_id)
+);
+Step 14 — Audit table
+CREATE TABLE audit_events (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    event_id VARCHAR(100) NOT NULL UNIQUE,
+
+    service_name VARCHAR(100) NOT NULL,
+
+    user_id BIGINT,
+
+    action VARCHAR(100) NOT NULL,
+
+    resource_type VARCHAR(100),
+
+    resource_id VARCHAR(100),
+
+    old_value JSON,
+    new_value JSON,
+
+    ip_address VARCHAR(45),
+
+    correlation_id VARCHAR(100),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_audit_user
+        FOREIGN KEY (user_id)
+        REFERENCES users(id),
+
+    INDEX idx_audit_user (user_id),
+    INDEX idx_audit_resource (resource_type, resource_id),
+    INDEX idx_audit_created (created_at)
+);
+Step 15 — Check everything
+Run:
+
+SHOW TABLES;
+You should have approximately:
+
+audit_events
+draws
+lotteries
+lottery_rules
+prize_claims
+prize_tiers
+roles
+ticket_transactions
+tickets
+user_roles
+users
+winning_numbers
+winners
+Then:
+
+SELECT
+    TABLE_NAME
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'lottery_db';
+Step 16 — Insert our first test user
+For now, don't put a real password here. Later Spring Security will generate a BCrypt hash.
+
+INSERT INTO users
+(
+    username,
+    email,
+    password_hash,
+    first_name,
+    last_name,
+    phone
+)
+VALUES
+(
+    'admin',
+    'admin@example.com',
+    'TEMP_PASSWORD_HASH',
+    'System',
+    'Admin',
+    '9999999999'
+);
+Get the user:
+
+SELECT * FROM users;
+Suppose:
+
+id = 1
+Then connect the user to ADMIN:
+
+INSERT INTO user_roles (user_id, role_id)
+SELECT 1, id
+FROM roles
+WHERE name = 'ADMIN';
+Verify:
+
+SELECT
+    u.username,
+    r.name AS role
+FROM users u
+JOIN user_roles ur ON ur.user_id = u.id
+JOIN roles r ON r.id = ur.role_id;
+Expected:
+
+admin | ADMIN
+Step 17 — Create your first lottery
+Now we can test the database properly.
+
+INSERT INTO lotteries
+(
+    lottery_code,
+    name,
+    description,
+    ticket_price,
+    currency,
+    status,
+    sales_start_at,
+    sales_end_at,
+    draw_at,
+    max_tickets,
+    created_by
+)
+VALUES
+(
+    'LOT-001',
+    'Mega Sunday',
+    'Weekly lottery',
+    100.00,
+    'INR',
+    'DRAFT',
+    '2026-10-08 00:00:00',
+    '2026-10-10 18:00:00',
+    '2026-10-10 20:00:00',
+    100000,
+    1
+);
+Check:
+
+SELECT * FROM lotteries;
+Step 18 — Add prize tiers
+Assuming the lottery ID is 1:
+
+INSERT INTO prize_tiers
+(
+    lottery_id,
+    tier_number,
+    tier_name,
+    prize_amount,
+    winner_count
+)
+VALUES
+(1, 1, 'First Prize', 1000000.00, 1),
+(1, 2, 'Second Prize', 100000.00, 5),
+(1, 3, 'Third Prize', 10000.00, 50),
+(1, 4, 'Fourth Prize', 1000.00, 500);
+
+Check:
+
+SELECT * FROM prize_tiers;
+
+Step 19 — Add lottery rules
+INSERT INTO lottery_rules
+(
+    lottery_id,
+    number_count,
+    min_number,
+    max_number,
+    allow_multiple_winners,
+    allow_ticket_cancellation,
+    cancellation_cutoff_minutes
+)
+VALUES
+(
+    1,
+    6,
+    1,
+    49,
+    TRUE,
+    TRUE,
+    30
+);
+
+Step 20 — See the complete lottery
+Now run:
+
+SELECT
+    l.id,
+    l.lottery_code,
+    l.name,
+    l.ticket_price,
+    l.status,
+    l.sales_start_at,
+    l.sales_end_at,
+    l.draw_at,
+    r.number_count,
+    r.min_number,
+    r.max_number
+FROM lotteries l
+LEFT JOIN lottery_rules r
+    ON r.lottery_id = l.id
+WHERE l.id = 1;
+
+And prize information:
+
+SELECT
+    l.name AS lottery,
+    p.tier_number,
+    p.tier_name,
+    p.prize_amount,
+    p.winner_count
+FROM lotteries l
+JOIN prize_tiers p
+    ON p.lottery_id = l.id
+WHERE l.id = 1
+ORDER BY p.tier_number;
+
+Our database is now ready
+The dependency structure is:
+
+users
+  │
+  ├── roles
+  │
+  └── lotteries
+          │
+          ├── lottery_rules
+          │
+          ├── prize_tiers
+          │
+          ├── tickets
+          │      │
+          │      └── ticket_transactions
+          │
+          └── draws
+                  │
+                  └── winning_numbers
+                         │
+                         ▼
+                      winners
+                         │
+                         ▼
+                    prize_claims
+One thing I would change from the earlier architecture
+Since you're using one MySQL database right now, don't pretend we're already running a fully independent database-per-service architecture. That's unnecessary complexity.
+
+We'll use logical microservice ownership:
+
+auth-service       → users, roles
+lottery-service    → lotteries, prize_tiers, lottery_rules
+ticket-service     → tickets, ticket_transactions
+draw-service       → draws, winning_numbers
+winner-service     → winners, prize_claims
+All currently happen to live inside lottery_db.
+
+Later, when the application is mature, we can split the databases if there's a real operational reason.
+
+Next step
+Now we should create the Spring Boot project and connect it to this database.
+
+We'll start with:
+
+Java 25
+Spring Boot
+Maven
+Spring Web
+Spring Data JPA
+MySQL Driver
+Flyway
+Validation
+Lombok
+Spring Security
+Then we'll build our first real API:
+
+POST /api/lotteries
+GET  /api/lotteries
+GET  /api/lotteries/{id}
+PUT  /api/lotteries/{id}
+and connect it to the lotteries table.
+
+
+Pasted markdown.md
+Document
+Step 3 — Database Design
+For the first working version, use:
+
+MySQL Server
+└── lottery_db
+    ├── Auth tables
+    ├── Lottery tables
+    ├── Ticket tables
+    ├── Draw tables
+    ├── Winner tables
+    └── Audit tables
+This is intentionally different from the final database-per-service architecture in the document. Do not create six databases now. It would slow down development without giving us much learning benefit at this stage.
+
+3.1 Logical ownership
+Service	Tables
+auth-service	users, roles, user_roles
+lottery-service	lotteries, prize_tiers, lottery_rules
+ticket-service	tickets, ticket_transactions
+draw-service	draws, winning_numbers
+winner-service	winners, prize_claims
+audit-service	audit_events
+The important rule remains:
+
+A service owns its tables. Another service must not directly modify them.
+
+3.2 Database
+CREATE DATABASE lottery_db;
+
+USE lottery_db;
+
+3.3 Auth tables
+users
+CREATE TABLE users (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    phone VARCHAR(20),
+    status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP
+);
+
+roles
+CREATE TABLE roles (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE,
+    description VARCHAR(255),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+Insert our four roles:
+
+INSERT INTO roles (name, description)
+VALUES
+('ADMIN', 'System administrator'),
+('AGENT', 'Lottery ticket agent'),
+('CUSTOMER', 'Lottery customer'),
+('AUDITOR', 'Read-only auditor');
+
+user_roles
+CREATE TABLE user_roles (
+    user_id BIGINT NOT NULL,
+    role_id BIGINT NOT NULL,
+
+    PRIMARY KEY (user_id, role_id),
+
+    CONSTRAINT fk_user_roles_user
+        FOREIGN KEY (user_id)
+        REFERENCES users(id),
+
+    CONSTRAINT fk_user_roles_role
+        FOREIGN KEY (role_id)
+        REFERENCES roles(id)
+);
+
+3.4 Lottery tables
+lotteries
+CREATE TABLE lotteries (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    lottery_code VARCHAR(50) NOT NULL UNIQUE,
+    name VARCHAR(150) NOT NULL,
+    description TEXT,
+
+    ticket_price DECIMAL(12,2) NOT NULL,
+    currency VARCHAR(3) NOT NULL DEFAULT 'INR',
+
+    status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+
+    sales_start_at DATETIME NOT NULL,
+    sales_end_at DATETIME NOT NULL,
+    draw_at DATETIME NOT NULL,
+
+    max_tickets BIGINT,
+
+    created_by BIGINT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_ticket_price
+        CHECK (ticket_price > 0),
+
+    CONSTRAINT chk_lottery_dates
+        CHECK (
+            sales_start_at < sales_end_at
+            AND sales_end_at <= draw_at
+        ),
+
+    CONSTRAINT fk_lottery_created_by
+        FOREIGN KEY (created_by)
+        REFERENCES users(id)
+);
+
+prize_tiers
+CREATE TABLE prize_tiers (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    lottery_id BIGINT NOT NULL,
+
+    tier_number INT NOT NULL,
+    tier_name VARCHAR(100) NOT NULL,
+
+    prize_amount DECIMAL(15,2) NOT NULL,
+    winner_count INT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_lottery_tier
+        UNIQUE (lottery_id, tier_number),
+
+    CONSTRAINT chk_prize_amount
+        CHECK (prize_amount >= 0),
+
+    CONSTRAINT chk_winner_count
+        CHECK (winner_count > 0),
+
+    CONSTRAINT fk_prize_lottery
+        FOREIGN KEY (lottery_id)
+        REFERENCES lotteries(id)
+);
+
+lottery_rules
+CREATE TABLE lottery_rules (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    lottery_id BIGINT NOT NULL UNIQUE,
+
+    number_count INT NOT NULL,
+    min_number INT NOT NULL,
+    max_number INT NOT NULL,
+
+    allow_multiple_winners BOOLEAN NOT NULL DEFAULT TRUE,
+
+    allow_ticket_cancellation BOOLEAN NOT NULL DEFAULT FALSE,
+    cancellation_cutoff_minutes INT,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_rules_lottery
+        FOREIGN KEY (lottery_id)
+        REFERENCES lotteries(id)
+);
+
+3.5 Ticket tables
+tickets
+CREATE TABLE tickets (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    ticket_id VARCHAR(50) NOT NULL UNIQUE,
+
+    lottery_id BIGINT NOT NULL,
+
+    customer_id BIGINT,
+    agent_id BIGINT,
+
+    ticket_number VARCHAR(100) NOT NULL,
+
+    price DECIMAL(12,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'ISSUED',
+
+    purchased_at DATETIME NOT NULL,
+    issued_at DATETIME,
+    cancelled_at DATETIME,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_lottery_ticket_number
+        UNIQUE (lottery_id, ticket_number),
+
+    CONSTRAINT fk_ticket_lottery
+        FOREIGN KEY (lottery_id)
+        REFERENCES lotteries(id),
+
+    CONSTRAINT fk_ticket_customer
+        FOREIGN KEY (customer_id)
+        REFERENCES users(id),
+
+    CONSTRAINT fk_ticket_agent
+        FOREIGN KEY (agent_id)
+        REFERENCES users(id),
+
+    INDEX idx_ticket_lottery (lottery_id),
+    INDEX idx_ticket_customer (customer_id),
+    INDEX idx_ticket_agent (agent_id),
+    INDEX idx_ticket_status (status)
+);
+
+ticket_transactions
+CREATE TABLE ticket_transactions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    ticket_id BIGINT NOT NULL,
+
+    transaction_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    transaction_type VARCHAR(30) NOT NULL,
+
+    amount DECIMAL(12,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL,
+
+    payment_method VARCHAR(30),
+
+    external_reference VARCHAR(150),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_transaction_ticket
+        FOREIGN KEY (ticket_id)
+        REFERENCES tickets(id),
+
+    INDEX idx_transaction_ticket (ticket_id)
+);
+
+3.6 Draw tables
+draws
+CREATE TABLE draws (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    draw_id VARCHAR(50) NOT NULL UNIQUE,
+
+    lottery_id BIGINT NOT NULL,
+
+    scheduled_at DATETIME NOT NULL,
+
+    started_at DATETIME,
+    completed_at DATETIME,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'SCHEDULED',
+
+    execution_reference VARCHAR(150),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_draw_lottery
+        FOREIGN KEY (lottery_id)
+        REFERENCES lotteries(id),
+
+    INDEX idx_draw_lottery (lottery_id),
+    INDEX idx_draw_status (status)
+);
+
+winning_numbers
+CREATE TABLE winning_numbers (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    draw_id BIGINT NOT NULL,
+
+    sequence_number INT NOT NULL,
+    winning_number INT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_draw_sequence
+        UNIQUE (draw_id, sequence_number),
+
+    CONSTRAINT uq_draw_number
+        UNIQUE (draw_id, winning_number),
+
+    CONSTRAINT fk_winning_draw
+        FOREIGN KEY (draw_id)
+        REFERENCES draws(id)
+);
+
+3.7 Winner tables
+winners
+CREATE TABLE winners (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    winner_id VARCHAR(50) NOT NULL UNIQUE,
+
+    draw_id BIGINT NOT NULL,
+    ticket_id BIGINT NOT NULL,
+    lottery_id BIGINT NOT NULL,
+    customer_id BIGINT,
+
+    prize_tier_id BIGINT,
+
+    prize_amount DECIMAL(15,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'DECLARED',
+
+    declared_at DATETIME NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_winner_draw
+        FOREIGN KEY (draw_id)
+        REFERENCES draws(id),
+
+    CONSTRAINT fk_winner_ticket
+        FOREIGN KEY (ticket_id)
+        REFERENCES tickets(id),
+
+    CONSTRAINT fk_winner_lottery
+        FOREIGN KEY (lottery_id)
+        REFERENCES lotteries(id),
+
+    CONSTRAINT fk_winner_customer
+        FOREIGN KEY (customer_id)
+        REFERENCES users(id),
+
+    CONSTRAINT fk_winner_prize_tier
+        FOREIGN KEY (prize_tier_id)
+        REFERENCES prize_tiers(id)
+);
+
+prize_claims
+CREATE TABLE prize_claims (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    winner_id BIGINT NOT NULL UNIQUE,
+
+    claim_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+
+    claimed_at DATETIME,
+    verified_at DATETIME,
+
+    verified_by BIGINT,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_claim_winner
+        FOREIGN KEY (winner_id)
+        REFERENCES winners(id),
+
+    CONSTRAINT fk_claim_verified_by
+        FOREIGN KEY (verified_by)
+        REFERENCES users(id)
+);
+
+3.8 Audit table
+CREATE TABLE audit_events (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    event_id VARCHAR(100) NOT NULL UNIQUE,
+
+    service_name VARCHAR(100) NOT NULL,
+
+    user_id BIGINT,
+
+    action VARCHAR(100) NOT NULL,
+
+    resource_type VARCHAR(100),
+
+    resource_id VARCHAR(100),
+
+    old_value JSON,
+    new_value JSON,
+
+    ip_address VARCHAR(45),
+
+    correlation_id VARCHAR(100),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_audit_user
+        FOREIGN KEY (user_id)
+        REFERENCES users(id),
+
+    INDEX idx_audit_user (user_id),
+    INDEX idx_audit_resource (resource_type, resource_id),
+    INDEX idx_audit_created (created_at)
+);
+
+3.9 Final relationship
+                         USERS
+                       /   |   \
+                      /    |    \
+                     ▼     ▼     ▼
+                  ROLES  TICKETS
+                    │       │
+                    │       │
+               USER_ROLES   │
+                            │
+                            ▼
+                         LOTTERIES
+                         /       \
+                        /         \
+                       ▼           ▼
+                PRIZE_TIERS   LOTTERY_RULES
+                    │
+                    │
+                    ▼
+                 WINNERS
+                  ▲   │
+                  │   ▼
+                DRAWS  PRIZE_CLAIMS
+                  │
+                  ▼
+          WINNING_NUMBERS
+
+
+TICKETS
+   │
+   ▼
+TICKET_TRANSACTIONS
+
+
+USERS
+   │
+   ▼
+AUDIT_EVENTS
+3.10 Verify everything
+Run:
+
+SHOW TABLES;
+
+You should see:
+
+audit_events
+draws
+lotteries
+lottery_rules
+prize_claims
+prize_tiers
+roles
+ticket_transactions
+tickets
+user_roles
+users
+winning_numbers
+winners
+Then:
+
+SELECT
+    TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = 'lottery_db'
+ORDER BY TABLE_NAME;
+
+One important improvement later
+We will not consider this database design completely finished. Before production hardening, we'll add things such as:
+
+refresh-token storage
+idempotency handling
+outbox events
+stronger status constraints
+indexes based on actual query patterns
+optimistic/pessimistic locking where needed
+ticket cancellation history
+payment records
+commission records
+possibly separate audit storage
+But don't add all of that now. We want to get the core application running first.
+
+Next step
+Now that the database structure is in place, we should move to Step 4 — API Design, define the request/response DTOs and HTTP status codes, and then create the Spring Boot lottery-service with its first APIs:
+
+POST   /api/lotteries
+GET    /api/lotteries
+GET    /api/lotteries/{id}
+PUT    /api/lotteries/{id}
+That is where we start writing the actual Java code.
+
+can u creae table for mulple db
+
+Yes. For your Lottery Management System, I actually recommend moving to multiple databases now if your goal is to learn a proper microservices architecture.
+
+Instead of one lottery_db, we can create one MySQL database per service, while keeping the same table ownership.
+
+Proposed database structure
+Database	Service	Tables
+lottery_auth_db	Auth Service	users, roles, user_roles
+lottery_db	Lottery Service	lotteries, prize_tiers, lottery_rules
+lottery_ticket_db	Ticket Service	tickets, ticket_transactions
+lottery_draw_db	Draw Service	draws, winning_numbers
+lottery_winner_db	Winner Service	winners, prize_claims
+lottery_audit_db	Audit Service	audit_events
+This matches the database-per-service architecture from your project design. 
+
+Important change
+We should not use foreign keys across databases/services.
+
+For example:
+
+lottery_ticket_db.tickets
+        |
+        | lottery_id
+        ↓
+lottery_db.lotteries
+lottery_id is just a value in the Ticket Service. The Ticket Service gets lottery information through the Lottery Service API, not through a cross-database FK.
+
+Similarly:
+
+ticket_db
+    ticket_id
+       ↓
+winner_db
+    winners
+The Winner Service communicates with Ticket/Draw services through REST/Kafka rather than directly accessing their tables.
+
+MySQL creation
+We can start with:
+
+CREATE DATABASE lottery_auth_db;
+CREATE DATABASE lottery_db;
+CREATE DATABASE lottery_ticket_db;
+CREATE DATABASE lottery_draw_db;
+CREATE DATABASE lottery_winner_db;
+CREATE DATABASE lottery_audit_db;
+
+Then I'll give you the complete SQL for each database separately, including indexes, constraints, and sample data.
+
+I recommend this approach for your project because it will teach you the real microservice pattern rather than building a monolith that is later split.
+
+yes
+
+Worked for a couple of seconds
+Absolutely. Below is the complete multi-database MySQL setup for our Lottery Management System.
+
+1. Create all databases
+Run this first:
+
+CREATE DATABASE lottery_auth_db;
+CREATE DATABASE lottery_db;
+CREATE DATABASE lottery_ticket_db;
+CREATE DATABASE lottery_draw_db;
+CREATE DATABASE lottery_winner_db;
+CREATE DATABASE lottery_audit_db;
+
+2. Auth Service Database
+Database:
+
+USE lottery_auth_db;
+
+users
+CREATE TABLE users (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    phone VARCHAR(20),
+    status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP
+);
+
+roles
+CREATE TABLE roles (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE,
+    description VARCHAR(255),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+user_roles
+CREATE TABLE user_roles (
+    user_id BIGINT NOT NULL,
+    role_id BIGINT NOT NULL,
+
+    PRIMARY KEY (user_id, role_id),
+
+    CONSTRAINT fk_user_roles_user
+        FOREIGN KEY (user_id) REFERENCES users(id),
+
+    CONSTRAINT fk_user_roles_role
+        FOREIGN KEY (role_id) REFERENCES roles(id)
+);
+
+Insert roles
+INSERT INTO roles (name, description)
+VALUES
+('ADMIN', 'System administrator'),
+('AGENT', 'Lottery ticket agent'),
+('CUSTOMER', 'Lottery customer'),
+('AUDITOR', 'Read-only auditor');
+
+3. Lottery Service Database
+USE lottery_db;
+
+lotteries
+CREATE TABLE lotteries (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    lottery_code VARCHAR(50) NOT NULL UNIQUE,
+    name VARCHAR(150) NOT NULL,
+    description TEXT,
+
+    ticket_price DECIMAL(12,2) NOT NULL,
+    currency VARCHAR(3) NOT NULL DEFAULT 'INR',
+
+    status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+
+    sales_start_at DATETIME NOT NULL,
+    sales_end_at DATETIME NOT NULL,
+    draw_at DATETIME NOT NULL,
+
+    max_tickets BIGINT,
+
+    created_by BIGINT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_ticket_price
+        CHECK (ticket_price > 0),
+
+    CONSTRAINT chk_lottery_dates
+        CHECK (
+            sales_start_at < sales_end_at
+            AND sales_end_at <= draw_at
+        ),
+
+    INDEX idx_lottery_status (status),
+    INDEX idx_lottery_draw_at (draw_at)
+);
+
+Notice: no FK to users.
+
+created_by contains the user ID from lottery_auth_db, but the Lottery Service does not directly access the Auth database.
+
+prize_tiers
+CREATE TABLE prize_tiers (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    lottery_id BIGINT NOT NULL,
+
+    tier_number INT NOT NULL,
+    tier_name VARCHAR(100) NOT NULL,
+
+    prize_amount DECIMAL(15,2) NOT NULL,
+    winner_count INT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_lottery_tier
+        UNIQUE (lottery_id, tier_number),
+
+    CONSTRAINT chk_prize_amount
+        CHECK (prize_amount >= 0),
+
+    CONSTRAINT chk_winner_count
+        CHECK (winner_count > 0),
+
+    CONSTRAINT fk_prize_lottery
+        FOREIGN KEY (lottery_id) REFERENCES lotteries(id)
+);
+
+lottery_rules
+CREATE TABLE lottery_rules (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    lottery_id BIGINT NOT NULL UNIQUE,
+
+    number_count INT NOT NULL,
+    min_number INT NOT NULL,
+    max_number INT NOT NULL,
+
+    allow_multiple_winners BOOLEAN NOT NULL DEFAULT TRUE,
+
+    allow_ticket_cancellation BOOLEAN NOT NULL DEFAULT FALSE,
+
+    cancellation_cutoff_minutes INT,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_rules_lottery
+        FOREIGN KEY (lottery_id) REFERENCES lotteries(id)
+);
+
+4. Ticket Service Database
+USE lottery_ticket_db;
+
+tickets
+CREATE TABLE tickets (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    ticket_id VARCHAR(50) NOT NULL UNIQUE,
+
+    lottery_id BIGINT NOT NULL,
+    customer_id BIGINT,
+    agent_id BIGINT,
+
+    ticket_number VARCHAR(100) NOT NULL,
+
+    price DECIMAL(12,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'ISSUED',
+
+    purchased_at DATETIME NOT NULL,
+    issued_at DATETIME,
+    cancelled_at DATETIME,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_lottery_ticket_number
+        UNIQUE (lottery_id, ticket_number),
+
+    INDEX idx_ticket_lottery (lottery_id),
+    INDEX idx_ticket_customer (customer_id),
+    INDEX idx_ticket_agent (agent_id),
+    INDEX idx_ticket_status (status)
+);
+
+Here:
+
+lottery_id  → lottery_db
+customer_id → lottery_auth_db
+agent_id    → lottery_auth_db
+They are logical references, not database foreign keys.
+
+ticket_transactions
+CREATE TABLE ticket_transactions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    ticket_id BIGINT NOT NULL,
+
+    transaction_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    transaction_type VARCHAR(30) NOT NULL,
+
+    amount DECIMAL(12,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL,
+
+    payment_method VARCHAR(30),
+
+    external_reference VARCHAR(150),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_transaction_ticket
+        FOREIGN KEY (ticket_id) REFERENCES tickets(id),
+
+    INDEX idx_transaction_ticket (ticket_id)
+);
+
+5. Draw Service Database
+USE lottery_draw_db;
+
+draws
+CREATE TABLE draws (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    draw_id VARCHAR(50) NOT NULL UNIQUE,
+
+    lottery_id BIGINT NOT NULL,
+
+    scheduled_at DATETIME NOT NULL,
+
+    started_at DATETIME,
+    completed_at DATETIME,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'SCHEDULED',
+
+    execution_reference VARCHAR(150),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    INDEX idx_draw_lottery (lottery_id),
+    INDEX idx_draw_status (status)
+);
+
+winning_numbers
+CREATE TABLE winning_numbers (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    draw_id BIGINT NOT NULL,
+
+    sequence_number INT NOT NULL,
+
+    winning_number INT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT uq_draw_sequence
+        UNIQUE (draw_id, sequence_number),
+
+    CONSTRAINT uq_draw_number
+        UNIQUE (draw_id, winning_number),
+
+    CONSTRAINT fk_winning_draw
+        FOREIGN KEY (draw_id) REFERENCES draws(id)
+);
+
+6. Winner Service Database
+USE lottery_winner_db;
+
+winners
+CREATE TABLE winners (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    winner_id VARCHAR(50) NOT NULL UNIQUE,
+
+    draw_id BIGINT NOT NULL,
+
+    ticket_id BIGINT NOT NULL,
+
+    lottery_id BIGINT NOT NULL,
+
+    customer_id BIGINT,
+
+    prize_tier_id BIGINT,
+
+    prize_amount DECIMAL(15,2) NOT NULL,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'DECLARED',
+
+    declared_at DATETIME NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_winner_draw (draw_id),
+    INDEX idx_winner_ticket (ticket_id),
+    INDEX idx_winner_customer (customer_id),
+    INDEX idx_winner_status (status)
+);
+
+Notice that we do not create FKs to:
+
+draw_db.draws
+ticket_db.tickets
+lottery_db.lotteries
+auth_db.users
+lottery_db.prize_tiers
+The Winner Service gets this information through APIs/events.
+
+prize_claims
+CREATE TABLE prize_claims (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    winner_id BIGINT NOT NULL UNIQUE,
+
+    claim_reference VARCHAR(100) NOT NULL UNIQUE,
+
+    status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+
+    claimed_at DATETIME,
+
+    verified_at DATETIME,
+
+    verified_by BIGINT,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_claim_winner
+        FOREIGN KEY (winner_id) REFERENCES winners(id),
+
+    INDEX idx_claim_status (status)
+);
+
+verified_by is the ID of the admin/agent from Auth Service, so again no cross-database FK.
+
+7. Audit Service Database
+USE lottery_audit_db;
+
+audit_events
+CREATE TABLE audit_events (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+    event_id VARCHAR(100) NOT NULL UNIQUE,
+
+    service_name VARCHAR(100) NOT NULL,
+
+    user_id BIGINT,
+
+    action VARCHAR(100) NOT NULL,
+
+    resource_type VARCHAR(100),
+
+    resource_id VARCHAR(100),
+
+    old_value JSON,
+
+    new_value JSON,
+
+    ip_address VARCHAR(45),
+
+    correlation_id VARCHAR(100),
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_audit_user (user_id),
+    INDEX idx_audit_resource (resource_type, resource_id),
+    INDEX idx_audit_created (created_at),
+    INDEX idx_audit_correlation (correlation_id)
+);
+
+8. Final architecture
+Now our databases look like this:
+
+                    ┌──────────────────────┐
+                    │   lottery_auth_db     │
+                    │                      │
+                    │ users                │
+                    │ roles                │
+                    │ user_roles           │
+                    └──────────┬───────────┘
+                               │
+                         Auth Service
+                               │
+        ┌──────────────────────┼──────────────────────┐
+        │                      │                      │
+        ▼                      ▼                      ▼
+
+┌────────────────┐    ┌──────────────────┐    ┌────────────────┐
+│ lottery_db     │    │ lottery_ticket_db│    │ lottery_draw_db│
+│                │    │                  │    │                │
+│ lotteries      │    │ tickets          │    │ draws          │
+│ prize_tiers    │    │ transactions     │    │ winning_numbers│
+│ lottery_rules  │    │                  │    │                │
+└───────┬────────┘    └─────────┬────────┘    └───────┬────────┘
+        │                       │                     │
+        │                       │                     │
+        └───────────────┬───────┴─────────────────────┘
+                        │
+                     Kafka
+                        │
+                        ▼
+              ┌──────────────────┐
+              │ lottery_winner_db│
+              │                  │
+              │ winners          │
+              │ prize_claims     │
+              └──────────────────┘
+
+                        +
+                        
+              ┌──────────────────┐
+              │ lottery_audit_db │
+              │                  │
+              │ audit_events     │
+              └──────────────────┘
+9. The most important microservice rule
+Don't do this:
+
+ticketService -> SELECT * FROM lottery_db.lotteries
+
+Instead:
+
+Ticket Service
+      │
+      │ REST
+      ▼
+Lottery Service
+      │
+      ▼
+lottery_db
+Or eventually:
+
+Ticket Service
+      │
+      │ Kafka/Event
+      ▼
+Lottery Service
+This is what makes the databases genuinely service-owned.
+
+10. Verify everything
+Run:
+
+SHOW DATABASES;
+
+You should see:
+
+lottery_auth_db
+lottery_db
+lottery_ticket_db
+lottery_draw_db
+lottery_winner_db
+lottery_audit_db
+Then:
+
+USE lottery_auth_db;
+SHOW TABLES;
+
+Expected:
+
+roles
+user_roles
+users
+USE lottery_db;
+SHOW TABLES;
+
+Expected:
+
+lotteries
+lottery_rules
+prize_tiers
+USE lottery_ticket_db;
+SHOW TABLES;
+
+Expected:
+
+ticket_transactions
+tickets
+USE lottery_draw_db;
+SHOW TABLES;
+
+Expected:
+
+draws
+winning_numbers
+USE lottery_winner_db;
+SHOW TABLES;
+
+Expected:
+
+prize_claims
+winners
+USE lottery_audit_db;
+SHOW TABLES;
+
+Expected:
+
+audit_events
+One important improvement
+I would not insert the test admin user yet because we are going to build the Auth Service with BCrypt password hashing. We should create the admin through the application rather than storing TEMP_PASSWORD_HASH.
+
+Next step: create the Spring Boot auth-service and connect it to lottery_auth_db. Then we'll implement registration → BCrypt password → login → JWT → role authorization.
+
+
+Excellent! Your database environment variables are configured. Now let's start your Lottery Management System's auth-service.
+
+Step 19: Run the Spring Boot application
+1. Find the main application class
+In IntelliJ IDEA, open:
+
+src/main/java/com/lottery/auth/AuthServiceApplication.java
+
+Your class should look similar to this:
+
+package com.lottery.auth;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class AuthServiceApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(AuthServiceApplication.class, args);
+    }
+}
+
+If IntelliJ generated a class with a slightly different name, use the existing main application class.
+
+2. Start the application
+Open the main application class.
+
+Click the green Run ▶ icon beside main().
+
+Wait for the application to start.
+
+Check the Run console at the bottom of IntelliJ.
+
+3. What should you look for?
+A successful startup typically includes a message similar to:
+
+Tomcat started on port 8081 (http)
+Started AuthServiceApplication
+Your exact log messages may differ depending on your Spring Boot version.
+
+If startup fails, common causes include:
+
+Access denied for user — database username or password is incorrect.
+
+Communications link failure — MySQL is not running or the connection URL is incorrect.
+
+Schema validation error — a database column does not match the User entity.
+
+Bean creation error — a required Spring bean or dependency is missing.
+
+Do not change database settings randomly if you see an error; we'll diagnose the actual message.
+
+Your task
+Run AuthServiceApplication and tell me which result you get:
+
+A. Application started successfully.
+
+B. Application failed with an error.
+
+If it fails, copy the relevant error from the IntelliJ Run console and send it here. We will fix it before testing the registration API.
+
+a
+Excellent! 🎉 Your Lottery Management System — auth-service is running successfully on port 8081.
+
+Now let's test whether your registration API works correctly.
+
+Step 20: Test the registration API using Postman
+1. Create a new request
+Open Postman and create a new HTTP request.
+
+Set the following:
+
+POST
+
+http://localhost:8081/api/auth/register
+
+Headers
+
+Key
+
+Value
+
+Content-Type
+
+application/json
+
+Body
+
+Select Body → raw → JSON, then enter:
+
+{
+  "username": "lotteryuser01",
+  "email": "lotteryuser01@example.com",
+  "password": "MySecurePass123!"
+}
+
+2. Click Send
+If everything is configured correctly, you should receive HTTP 201 Created and a response similar to this:
+
+{
+  "id": 1,
+  "username": "lotteryuser01",
+  "email": "lotteryuser01@example.com",
+  "firstName": null,
+  "lastName": null,
+  "status": "ACTIVE",
+  "createdAt": "2026-10-10T10:30:00"
+}
+
+The ID and timestamp are examples. Your response will contain the actual database values.
+
+3. Verify the database
+In MySQL, execute:
+
+USE lottery_auth_db;
+
+SELECT id, username, email, password_hash, status
+FROM users
+WHERE username = 'lotteryuser01';
+
+You should see the new user and a BCrypt password hash. The database should not contain the original password in the password_hash column.
+
+4. What if you get an error?
+201 Created: Registration succeeded.
+
+400 Bad Request: Request validation failed.
+
+401 Unauthorized: Check your Spring Security configuration.
+
+409 Conflict: The username or email already exists, assuming the exception handler is active.
+
+500 Internal Server Error: Check the IntelliJ Run console for the underlying exception.
+
+Your task
+Send the request in Postman and tell me which HTTP status code you receive. We'll fix any issue before moving to login and JWT authentication.
+
+201
+
+Please write in English language.
+Excellent! 🎉 Your first registration API is working successfully!
+
+You have completed a major milestone in your Lottery Management System.
+
+Auth Service — Registration Successful
+Spring Boot + MySQL
+
+201 Created
+Spring Boot application started
+
+MySQL database connection working
+
+User registration endpoint working
+
+BCrypt password hashing configured
+
+Registration response excludes password hash
+
+Validation and duplicate-user handling added
+
+Step 21: Test duplicate-user handling
+Before implementing login, let's confirm that the API prevents duplicate registrations.
+
+1. In Postman
+Send the same POST request again, using the same username and email:
+
+POST http://localhost:8081/api/auth/register
+
+{
+  "username": "lotteryuser01",
+  "email": "lotteryuser01@example.com",
+  "password": "MySecurePass123!"
+}
+
+2. Expected result
+You should receive HTTP 409 Conflict, with a response similar to:
+
+{
+  "error": "Conflict",
+  "message": "Username already exists"
+}
+
+The username check runs first, so the message should normally refer to the username.
+
+3. Why are we testing this?
+It confirms duplicate checking works.
+
+It verifies that the global exception handler converts the custom exception into an HTTP error.
+
+It prevents duplicate registrations through the normal registration flow.
+
+Your task: Send the same request again and tell me the status code you receive.
+
+Next, we'll build the login API and begin JWT authentication.
+
+409
+
+Please write in English language.
+Perfect! 🎉 Your duplicate-user test passed.
+
+201 Created — the first registration succeeded.
+
+409 Conflict — the second registration was rejected because the username already exists.
+
+Your registration flow is working as expected.
+
+Step 22: Create LoginRequest.java
+Now we'll start building the login API. First, we need a DTO to receive the user's login credentials.
+
+1. Create the class
+In IntelliJ IDEA:
+
+Open com.lottery.auth.dto.
+
+Right-click → New → Java Class.
+
+Name it LoginRequest.
+
+2. Add this code
+
+package com.lottery.auth.dto;
+
+import jakarta.validation.constraints.NotBlank;
+
+public class LoginRequest {
+
+    @NotBlank(message = "Username or email is required")
+    private String usernameOrEmail;
+
+    @NotBlank(message = "Password is required")
+    private String password;
+
+    public LoginRequest() {
+    }
+
+    public String getUsernameOrEmail() {
+        return usernameOrEmail;
+    }
+
+    public void setUsernameOrEmail(String usernameOrEmail) {
+        this.usernameOrEmail = usernameOrEmail;
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+}
+
+3. Understand the code
+Code
+
+Explanation
+
+LoginRequest
+
+Represents the data submitted during login.
+
+usernameOrEmail
+
+Allows a user to log in using either their username or email address.
+
+password
+
+Holds the password submitted for verification.
+
+@NotBlank
+
+Rejects missing or whitespace-only values.
+
+Getters and setters
+
+Allow Spring to populate and read the request fields.
+
+We will use PasswordEncoder.matches() to verify the submitted password against the stored BCrypt hash. We will never compare a plain-text password directly with the hash.
+
+4. Example login request
+Later, you will send this JSON through Postman:
+
+{
+  "usernameOrEmail": "lotteryuser01",
+  "password": "MySecurePass123!"
+}
+
+Your task: Create and save LoginRequest.java.
+
+Reply done when finished. Next, we'll implement the login service logic.
+
+done
+
+Please write in English language.
+Great! ✅ We have completed LoginRequest.java.
+
+Step 23: Create InvalidCredentialsException.java
+When a user enters an incorrect username, email, or password, we need a clear way to handle the login error.
+
+1. Create the Java class
+In IntelliJ IDEA, navigate to:
+
+src/main/java/com/lottery/auth/exception
+
+Right-click the exception package → New → Java Class → enter:
+
+InvalidCredentialsException
+
+2. Add this code
+
+package com.lottery.auth.exception;
+
+public class InvalidCredentialsException extends RuntimeException {
+
+    public InvalidCredentialsException(String message) {
+        super(message);
+    }
+}
+
+3. Understand the code
+extends RuntimeException: makes this a custom unchecked exception that can be thrown when login credentials are invalid.
+
+InvalidCredentialsException(String message): accepts the error message.
+
+super(message): passes the message to Java's parent exception class.
+
+Later, our login service can throw this exception when the supplied credentials are incorrect. We will also handle it centrally so the API returns an appropriate HTTP error response.
+
+Security note: We should use the same error message for an unknown username and an incorrect password, so attackers cannot easily discover registered usernames.
+
+Your task
+Create and save InvalidCredentialsException.java.
+
+Reply done when finished, and we will continue to the next step.
+
+
+Loading older messages…
+Continued from
+Build Lottery Management System (2)
+
+
+Continued from
+Build Lottery Management System
+setup is dne
+
+Great! Let's continue step by step. Since your auth-service project is open in IntelliJ IDEA, we'll check the Java configuration next.
+
+Step 1.2 — Verify Java in IntelliJ
+Open File → Project Structure.
+
+Select Project Settings → Project.
+
+Check these two fields:
+
+SDK: your installed Java version, such as 17, 21, or 25.
+
+Language level: choose the default for your selected JDK.
+
+Make sure the Project SDK is not showing <No SDK>.
+
+Step 1.3 — Verify the project builds
+Open the IntelliJ Terminal and run:
+
+.\mvnw.cmd clean compile
+
+Wait for it to finish. Ideally, you'll see:
+
+BUILD SUCCESS
+If it fails, copy the error message here and we'll fix it.
+
+Tell me which result you got:
+
+
+BUILD SUCCESS
+
+
+Java / JDK error
+
+Maven or dependency error
+
+Something else / I need help finding Project SDK
+go to project creation
+Okay! Let's start the Lottery Management System project creation from the beginning, step by step, using IntelliJ IDEA.
+
+Step 1 — Create the auth-service Spring Boot project
+1. Open Spring Initializr
+Click here: 
+https://start.spring.io
+
+2. Configure your project
+Enter these values:
+
+Project
+
+Maven
+
+Language
+
+Java
+
+Group
+
+com.lottery
+
+Artifact
+
+auth-service
+
+Name
+
+auth-service
+
+Package name
+
+com.lottery.auth
+
+Packaging
+
+Jar
+
+Java
+
+21 (if installed and compatible with the selected Spring Boot version)
+
+For Spring Boot, select the latest stable version offered by the website.
+
+3. Add dependencies
+Click Add Dependencies and select these six:
+
+Spring Web
+
+Spring Data JPA
+
+MySQL Driver
+
+Spring Security
+
+Validation
+
+Spring Boot Actuator
+
+4. Generate the project
+Click Generate, extract the downloaded ZIP, and open the extracted auth-service folder in IntelliJ IDEA.
+
+Your project should have a structure similar to:
+
+auth-service/
+├── src/
+│   ├── main/
+│   │   ├── java/
+│   │   └── resources/
+│   └── test/
+├── mvnw
+├── mvnw.cmd
+└── pom.xml
+Stop here for now
+Have you completed project creation?
+
+
+Yes, project is created and open in IntelliJ.
+
+I'm on Spring Initializr and need help.
+
+I encountered an error.
+The auth-service project is created and open in IntelliJ. Guide me through the next project setup step only.
+Step 2 — Configure the MySQL database connection
+Now we'll connect your Spring Boot auth-service to the MySQL database lottery_auth_db that we created earlier.
+
+2.1 Open application.properties
+In IntelliJ's Project panel, navigate to:
+
+auth-service
+ └── src
+     └── main
+         └── resources
+             └── application.properties
+Open application.properties.
+
+2.2 Add this configuration
+
+spring.application.name=auth-service
+server.port=8081
+
+spring.datasource.url=jdbc:mysql://localhost:3306/lottery_auth_db
+spring.datasource.username=${DB_USERNAME:root}
+spring.datasource.password=${DB_PASSWORD}
+
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
+spring.jpa.hibernate.ddl-auto=validate
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+Important: DB_PASSWORD must contain your actual MySQL password as an environment variable. Don't put your real password in source code or commit it to Git.
+
+The validate setting means Hibernate checks your existing database schema rather than creating or modifying tables automatically.
+
+2.3 Save the file
+Press Ctrl + S.
+
+That's all for this step. Don't create any Java classes yet.
+
+Tell me: Have you added and saved this configuration in application.properties?
+
+next
+Step 3 — Create the first Java package
+Now we'll organize your auth-service code in IntelliJ IDEA.
+
+3.1 Find your main Java package
+In the Project panel, open:
+
+src
+ └── main
+     └── java
+         └── com.lottery.auth
+You should see AuthServiceApplication.java inside com.lottery.auth.
+
+3.2 Create the entity package
+Right-click com.lottery.auth.
+
+Select New → Package.
+
+Enter:
+
+com.lottery.auth.entity
+4. Press Enter.
+
+Your structure should now look like this:
+
+com.lottery.auth
+├── AuthServiceApplication.java
+└── entity
+Why are we doing this? The entity package will contain Java classes mapped to MySQL tables, such as User.java and Role.java.
+
+For now, create only this package. We will create the User entity in the next step.
+
+Tell me when the entity package is created, and we'll continue.
+
+next
+Step 4 — Create the User entity
+Now we'll connect a Java class to the users table in your lottery_auth_db database.
+
+4.1 Create User.java
+In IntelliJ IDEA:
+
+Right-click com.lottery.auth.entity.
+
+Select New → Java Class.
+
+Enter User.
+
+Press Enter.
+
+4.2 Add this code
+Replace the contents of User.java with:
+
+
+package com.lottery.auth.entity;
+
+import jakarta.persistence.*;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "users")
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, unique = true, length = 100)
+    private String username;
+
+    @Column(nullable = false, unique = true, length = 255)
+    private String email;
+
+    @Column(name = "password_hash", nullable = false, length = 255)
+    private String passwordHash;
+
+    @Column(name = "first_name", length = 100)
+    private String firstName;
+
+    @Column(name = "last_name", length = 100)
+    private String lastName;
+
+    @Column(length = 20)
+    private String phone;
+
+    @Column(nullable = false, length = 30)
+    private String status = "ACTIVE";
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private LocalDateTime updatedAt;
+
+    @PrePersist
+    protected void onCreate() {
+        LocalDateTime now = LocalDateTime.now();
+        createdAt = now;
+        updatedAt = now;
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
+
+    public User() {
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public String getUsername() {
+        return username;
+    }
+
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public String getPasswordHash() {
+        return passwordHash;
+    }
+
+    public void setPasswordHash(String passwordHash) {
+        this.passwordHash = passwordHash;
+    }
+
+    public String getFirstName() {
+        return firstName;
+    }
+
+    public void setFirstName(String firstName) {
+        this.firstName = firstName;
+    }
+
+    public String getLastName() {
+        return lastName;
+    }
+
+    public void setLastName(String lastName) {
+        this.lastName = lastName;
+    }
+
+    public String getPhone() {
+        return phone;
+    }
+
+    public void setPhone(String phone) {
+        this.phone = phone;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public LocalDateTime getUpdatedAt() {
+        return updatedAt;
+    }
+}
+
+4.3 Save the file
+Press Ctrl + S.
+
+Your package structure should now look like this:
+
+com.lottery.auth
+├── AuthServiceApplication.java
+└── entity
+    └── User.java
+Important: This class maps to the users table we created earlier. We are not storing plain-text passwords; passwordHash will contain a BCrypt hash when we implement registration.
+
+For this step, don't create any additional classes.
+
+Tell me when User.java is created and saved, or share the error if IntelliJ shows one.
+
+and explane every thing in code
+Absolutely. From now on, I'll explain every line of code, why we use it, how it works, and how it connects to the database. Since you're building this project to learn Java and Spring Boot, understanding the code is just as important as making it work.
+
+Let's understand our User.java entity first.
+
+Step 4 — Understand the User.java entity
+1. What is an Entity?
+An entity is a Java class that represents a database table.
+
+In our project:
+
+Java class: User.java
+
+Represents one user in Java
+
+JPA / Hibernate mapping
+
+MySQL table: users
+
+Stores user records permanently
+
+For example, a record in MySQL might look like this:
+
+id
+
+username
+
+email
+
+status
+
+1
+
+admin
+
+admin@example.com
+
+ACTIVE
+
+2
+
+customer1
+
+customer1@example.com
+
+ACTIVE
+
+Each database row represents one User object.
+
+2. Package declaration and imports
+package com.lottery.auth.entity;
+
+import jakarta.persistence.*;
+import java.time.LocalDateTime;
+
+package com.lottery.auth.entity;
+A package organizes related Java classes.
+
+com.lottery — your application.
+
+auth — the authentication microservice.
+
+entity — classes representing database entities.
+
+This organization becomes useful when the project grows to include controllers, services, repositories, and configuration.
+
+import jakarta.persistence.*;
+This imports JPA annotations, including:
+
+@Entity
+
+@Table
+
+@Id
+
+@GeneratedValue
+
+@Column
+
+@PrePersist
+
+@PreUpdate
+
+What is JPA?
+
+JPA stands for Java Persistence API. It defines how Java objects map to relational database tables. Hibernate is the JPA implementation commonly used by Spring Boot.
+
+The * means all types in that package are available by their simple names. It doesn't import every Java class.
+
+import java.time.LocalDateTime;
+LocalDateTime represents a date and time without a time-zone offset.
+
+For example:
+
+LocalDateTime now = LocalDateTime.now();
+
+It might represent 2026-10-09T16:30:00, depending on your system clock.
+
+For production applications, we should standardize how timestamps and time zones are handled. For this first entity, we'll keep the mapping simple.
+
+3. Declare the entity
+@Entity
+@Table(name = "users")
+public class User {
+
+Let's break it down.
+
+@Entity
+Tells Hibernate that this class should be managed as a persistent database entity.
+
+Without @Entity, Hibernate won't treat User as a normal JPA entity.
+
+@Table(name = "users")
+Specifies the database table to which the entity maps.
+
+Our mapping is:
+
+Java class: User
+       ↓
+MySQL table: users
+The Java class uses the singular name User; the database table uses the plural name users.
+
+public class User
+Defines a public Java class named User.
+
+We can create objects like this:
+
+User user = new User();
+user.setUsername("customer1");
+user.setEmail("customer1@example.com");
+
+At this point, the object exists only in Java memory. It isn't automatically saved to MySQL.
+
+4. The primary key
+@Id
+@GeneratedValue(strategy = GenerationType.IDENTITY)
+private Long id;
+
+@Id
+Marks id as the entity's primary key.
+
+A primary key uniquely identifies each database row.
+
+@GeneratedValue(strategy = GenerationType.IDENTITY)
+Tells Hibernate to rely on the database's identity-generation mechanism. In our MySQL schema, that is:
+
+id BIGINT AUTO_INCREMENT PRIMARY KEY
+
+When a new user is inserted, MySQL generates the ID.
+
+For example:
+
+First user  → id = 1
+Second user → id = 2
+Third user  → id = 3
+Don't manually assign these IDs during normal registration.
+
+private Long id;
+Long represents a 64-bit integer.
+
+private restricts direct access from outside the class.
+
+The ID is nullable before the database inserts the new user.
+
+We use the wrapper type Long rather than primitive long because a new entity can have a null ID.
+
+5. Username and email
+@Column(nullable = false, unique = true, length = 100)
+private String username;
+
+@Column(nullable = false, unique = true, length = 255)
+private String email;
+
+@Column
+Controls how a Java field maps to a database column.
+
+For username:
+
+nullable = false means the database column must not contain NULL.
+
+unique = true means duplicate usernames are not allowed.
+
+length = 100 sets the column length to 100 characters.
+
+For email, the maximum length is 255.
+
+The corresponding database definition is approximately:
+
+username VARCHAR(100) NOT NULL UNIQUE,
+email VARCHAR(255) NOT NULL UNIQUE
+
+Important: Database constraints are essential because two users might try to register the same username simultaneously. Application validation alone cannot guarantee uniqueness.
+
+We'll also validate requests at the API layer later.
+
+private String username;
+String stores text.
+
+We use private fields to protect the object's internal state and expose controlled access through methods.
+
+6. Password storage
+@Column(name = "password_hash", nullable = false, length = 255)
+private String passwordHash;
+
+There are two names here:
+
+Java field: passwordHash
+
+Database column: password_hash
+
+The name attribute explicitly maps one to the other.
+
+Why store a hash instead of the original password?
+
+Suppose a user registers with a password. Our future registration service will use BCrypt to produce a password hash, then store that hash in this field.
+
+Conceptually:
+
+User enters password
+        ↓
+BCrypt hashes password
+        ↓
+password_hash column stores hash
+During login, Spring Security's password encoder compares the submitted password with the stored hash.
+
+Never store plain-text passwords. Never return passwordHash in an API response.
+
+7. First name, last name, and phone
+@Column(name = "first_name", length = 100)
+private String firstName;
+
+@Column(name = "last_name", length = 100)
+private String lastName;
+
+@Column(length = 20)
+private String phone;
+
+These fields store optional profile information.
+
+The name attribute maps firstName to first_name and lastName to last_name.
+
+The columns are nullable because we haven't marked them nullable = false.
+
+We store phone numbers as String, not Long, because phone numbers aren't quantities used in arithmetic. A string can preserve leading zeros and a + country prefix.
+
+8. User status
+@Column(nullable = false, length = 30)
+private String status = "ACTIVE";
+
+This field represents whether an account is active.
+
+For our first version, we'll use values such as:
+
+ACTIVE
+
+INACTIVE
+
+LOCKED
+
+The initial Java value is "ACTIVE".
+
+However, that Java default is not a complete security policy. In a production registration flow, account activation and locking must be handled explicitly, and we should validate permitted status values.
+
+The MySQL schema also has a default of ACTIVE. We'll keep the database and application defaults consistent.
+
+9. Created and updated timestamps
+@Column(name = "created_at", nullable = false, updatable = false)
+private LocalDateTime createdAt;
+
+@Column(name = "updated_at", nullable = false)
+private LocalDateTime updatedAt;
+
+These fields track when a user record was created and last updated.
+
+createdAt
+updatable = false tells Hibernate not to include this column in normal entity update statements.
+
+It helps preserve the original creation time.
+
+updatedAt
+This timestamp should change whenever the user entity is updated through the relevant JPA lifecycle callbacks.
+
+The MySQL schema also defines automatic timestamp defaults and updates. We'll need to keep these responsibilities consistent so that the Java callbacks and database behavior don't unexpectedly disagree.
+
+10. @PrePersist
+@PrePersist
+protected void onCreate() {
+    LocalDateTime now = LocalDateTime.now();
+    createdAt = now;
+    updatedAt = now;
+}
+
+@PrePersist is a JPA lifecycle callback.
+
+JPA invokes this method before inserting a new entity into the database.
+
+The line:
+
+LocalDateTime now = LocalDateTime.now();
+
+gets the current date and time from the system clock.
+
+Both timestamps receive the same value because creation and last-update time are initially identical.
+
+For example:
+
+created_at = 2026-10-09 16:30:00
+updated_at = 2026-10-09 16:30:00
+11. @PreUpdate
+@PreUpdate
+protected void onUpdate() {
+    updatedAt = LocalDateTime.now();
+}
+
+JPA calls this method before updating an existing managed entity.
+
+The creation timestamp stays unchanged, while the update timestamp receives a new value.
+
+Note that JPA lifecycle callbacks apply to normal entity persistence operations. Bulk JPQL updates and direct SQL updates can bypass them, so those operations need separate consideration.
+
+12. Constructor
+public User() {
+}
+
+This is a no-argument constructor.
+
+JPA requires an entity to have a public or protected no-argument constructor so it can instantiate the entity when loading records.
+
+We can also use it when creating a new object:
+
+User user = new User();
+
+The constructor doesn't save the object to the database.
+
+13. Getters and setters
+Example:
+
+public String getUsername() {
+    return username;
+}
+
+public void setUsername(String username) {
+    this.username = username;
+}
+
+A getter reads a field's value.
+
+String name = user.getUsername();
+
+A setter changes a field's value.
+
+user.setUsername("customer1");
+
+The keyword this refers to the current object.
+
+In:
+
+this.username = username;
+
+this.username is the field belonging to the current User object.
+
+username is the value passed into the method.
+
+We provide getters for the ID and timestamps but no setters for them. That prevents ordinary calling code from changing these fields directly through setters.
+
+For a larger application, we can use Lombok to reduce boilerplate, but explicit getters and setters are helpful while learning.
+
+14. What happens when we save a user?
+Once we build the registration service, the flow will be:
+
+Registration API
+
+Receives username, email and password
+
+Validation and BCrypt
+
+Validates input and hashes the password
+
+UserRepository
+
+Calls the JPA persistence layer
+
+MySQL: lottery_auth_db.users
+
+Stores the new record
+
+The entity defines the mapping. The repository performs database operations, and the service will contain registration logic.
+
+15. Your next step
+Before we move on, make sure User.java is saved and there are no red compilation errors.
+
+Our next class will be UserRepository.java. We'll learn how Spring Data JPA provides database operations without requiring us to write a SQL query for every basic operation.
+
+next
+Step 5 — Create UserRepository.java
+Now we'll create the repository that lets our Auth Service communicate with MySQL. I'll explain each part of the code and why we need it.
+
+5.1 Create the repository package
+In IntelliJ IDEA:
+
+Open src/main/java/com/lottery/auth.
+
+Right-click com.lottery.auth.
+
+Select New → Package.
+
+Enter:
+
+com.lottery.auth.repository
+5. Press Enter.
+
+Your structure should look like this:
+
+com.lottery.auth
+├── AuthServiceApplication.java
+├── entity
+│   └── User.java
+└── repository
+5.2 Create UserRepository.java
+Right-click the repository package.
+
+Select New → Java Class.
+
+Enter UserRepository.
+
+Paste this code:
+
+
+package com.lottery.auth.repository;
+
+import com.lottery.auth.entity.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+
+    Optional<User> findByUsername(String username);
+
+    Optional<User> findByEmail(String email);
+
+    boolean existsByUsername(String username);
+
+    boolean existsByEmail(String email);
+}
+
+Save the file with Ctrl + S.
+
+5.3 Understand every part
+A. Package declaration
+package com.lottery.auth.repository;
+
+This puts the class in the repository package. We keep database-access code separate from business logic.
+
+B. Import User
+import com.lottery.auth.entity.User;
+
+Our repository works with the User entity we created in Step 4. That entity maps to the MySQL users table.
+
+C. Import JpaRepository
+import org.springframework.data.jpa.repository.JpaRepository;
+
+JpaRepository is a Spring Data JPA interface that provides common database operations.
+
+For example, it already gives us methods such as:
+
+Method
+
+Purpose
+
+save(user)
+
+Insert or update a user
+
+findById(id)
+
+Find a user by primary key
+
+findAll()
+
+Retrieve all users
+
+deleteById(id)
+
+Delete a user by ID
+
+count()
+
+Count records
+
+We don't need to write SQL for these basic operations.
+
+D. Why is it an interface?
+public interface UserRepository
+        extends JpaRepository<User, Long> {
+
+An interface defines operations without implementing all of them itself.
+
+Spring Data JPA generates the repository implementation at runtime and provides it to Spring's dependency injection system.
+
+The two generic types mean:
+
+User — the entity this repository manages.
+
+Long — the Java type of the entity's primary key (User.id).
+
+E. Find a user by username
+Optional<User> findByUsername(String username);
+
+Spring Data JPA interprets the method name and generates the appropriate query.
+
+Conceptually, it performs:
+
+SELECT *
+FROM users
+WHERE username = ?;
+
+Why use Optional<User>?
+
+A username might not exist. Optional represents either a result or no result without requiring the method to return null.
+
+Example:
+
+Optional<User> user =
+        userRepository.findByUsername("customer1");
+
+if (user.isPresent()) {
+    System.out.println(user.get().getEmail());
+}
+
+We'll use this method during login to find the account by username.
+
+F. Find a user by email
+Optional<User> findByEmail(String email);
+
+This works similarly, but searches the email field.
+
+We'll use it to check whether an email is already registered.
+
+G. Check username existence
+boolean existsByUsername(String username);
+
+Returns true if a matching user exists, otherwise false.
+
+Example:
+
+if (userRepository.existsByUsername("customer1")) {
+    System.out.println("Username already exists");
+}
+
+This is useful for registration validation.
+
+H. Check email existence
+boolean existsByEmail(String email);
+
+This performs the equivalent existence check for email addresses.
+
+Important: These checks improve user feedback, but database UNIQUE constraints must remain in place. Two simultaneous requests can both pass an existence check, so registration must also handle duplicate-key errors safely.
+
+5.4 How everything connects
+UserService
+
+Business rules, registration and login
+
+UserRepository
+
+Database operations through JPA
+
+Hibernate / JPA
+
+Maps Java entities to SQL
+
+MySQL — lottery_auth_db.users
+
+The repository does not handle HTTP requests, validate passwords, or generate JWT tokens. Those responsibilities belong to other layers.
+
+5.5 Stop and verify
+For this step, you only need to create and save UserRepository.java.
+
+If IntelliJ marks JpaRepository red, check that Spring Data JPA was selected when you created the project and that Maven has finished importing dependencies.
+
+Tell me when this file is created successfully. Next, we'll create UserService.java and understand how the business logic uses this repository.
+
+next
+Great! Let’s continue your Lottery Management System — Auth Service step by step using IntelliJ IDEA.
+
+Step 56: Create UserService.java
+The UserRepository communicates with MySQL. The UserService will contain the business logic, such as registering a user and checking whether the username or email already exists.
+
+1. Create the package
+In IntelliJ IDEA, under src/main/java/com/lottery/auth:
+
+Right-click com.lottery.auth.
+
+Select New → Package.
+
+Enter com.lottery.auth.service.
+
+Right-click the new service package → New → Java Class.
+
+Name it UserService.
+
+2. Add this code
+
+package com.lottery.auth.service;
+
+import com.lottery.auth.entity.User;
+import com.lottery.auth.repository.UserRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.security.crypto.password.PasswordEncoder;
+
+@Service
+public class UserService {
+
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+
+    public UserService(
+            UserRepository userRepository,
+            PasswordEncoder passwordEncoder) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+    }
+
+    @Transactional
+    public User registerUser(
+            String username,
+            String email,
+            String rawPassword) {
+
+        if (userRepository.existsByUsername(username)) {
+            throw new IllegalArgumentException("Username already exists");
+        }
+
+        if (userRepository.existsByEmail(email)) {
+            throw new IllegalArgumentException("Email already exists");
+        }
+
+        User user = new User();
+        user.setUsername(username);
+        user.setEmail(email);
+        user.setPasswordHash(passwordEncoder.encode(rawPassword));
+
+        return userRepository.save(user);
+    }
+}
+
+3. Understand the code
+Code
+
+Meaning
+
+@Service
+
+Tells Spring this class contains business logic and should be managed by Spring.
+
+UserRepository
+
+Provides methods to check existing users and save a new user.
+
+PasswordEncoder
+
+Converts a plain-text password into a secure password hash.
+
+final fields
+
+Dependencies are assigned through the constructor and cannot be reassigned.
+
+Constructor
+
+Spring injects the repository and password encoder automatically.
+
+@Transactional
+
+Runs the database operation within a transaction.
+
+existsByUsername()
+
+Checks whether the username already exists.
+
+existsByEmail()
+
+Checks whether the email already exists.
+
+new User()
+
+Creates a new user entity in Java.
+
+passwordEncoder.encode()
+
+Hashes the password before storing it. Never save the plain-text password.
+
+userRepository.save(user)
+
+Saves the user to MySQL and returns the saved entity.
+
+4. Important: one dependency is not configured yet
+PasswordEncoder needs a Spring configuration bean. We will create that next using BCrypt, a password-hashing algorithm. Until that bean exists, the application will not start successfully.
+
+Also, this is our initial learning version. Later, we will add request validation and a response DTO so the API never exposes the stored password hash.
+
+Your task now: Create UserService.java with the code above. Tell me “done” when it is created, and we’ll configure BCrypt next.
+
+For Step 542, my GET http://localhost:8081/api/test/protected request in Postman with No Auth returns: 403 Forbidden. Please guide me through the next troubleshooting step.
+
+Please write in English language.
+
+Good, we have narrowed it down. Your protected GET endpoint returns 403 Forbidden even with No Auth. Let's check whether Spring Security is rejecting the request because of CSRF or another configuration issue.
+
+Step 543: Check SecurityConfig.java
+1. Open this file
+src/main/java/com/lottery/auth/config/SecurityConfig.java
+
+Your securityFilterChain() method should look like this:
+
+
+@Bean
+public SecurityFilterChain securityFilterChain(
+        HttpSecurity http) throws Exception {
+
+    http
+        .csrf(csrf -> csrf.disable())
+        .sessionManagement(session ->
+            session.sessionCreationPolicy(
+                SessionCreationPolicy.STATELESS))
+        .authorizeHttpRequests(auth -> auth
+            .requestMatchers(
+                "/api/auth/register",
+                "/api/auth/login"
+            ).permitAll()
+            .anyRequest().authenticated())
+        .httpBasic(basic -> basic.disable())
+        .formLogin(form -> form.disable())
+        .addFilterBefore(
+            jwtAuthenticationFilter,
+            UsernamePasswordAuthenticationFilter.class);
+
+    return http.build();
+}
+
+2. Check these three important lines
+csrf(csrf -> csrf.disable()) — disables CSRF protection, which is generally appropriate for this stateless JWT API.
+
+.anyRequest().authenticated() — requires authentication for the protected endpoint.
+
+.addFilterBefore(...) — registers your JWT filter in the Spring Security chain.
+
+Do not replace the whole file yet. Compare your code with the example and check whether any of these lines are missing or different.
+
+3. Tell me what you find
+Does your securityFilterChain() match the example?
+
+
+Yes, all lines match
+
+The CSRF line is missing or different
+
+The JWT filter registration is missing or different
+
+Something else is different
+Once we confirm the configuration, we'll inspect the next likely cause without making unnecessary changes.
+
+I checked SecurityConfig.java. Result: All lines match the provided configuration. Please guide me through the next Step 5to fix the 403 Forbidden response.
+
+Please write in English language.
+Good! Since your SecurityConfig.java matches, let's check whether your JWT filter is accidentally setting authentication incorrectly or whether the request is reaching the expected security chain.
+
+Step 544: Check the JWT filter
+Open:
+
+com.lottery.auth.security.JwtAuthenticationFilter.java
+
+Find this section near the beginning of doFilterInternal():
+
+String authorizationHeader =
+        request.getHeader("Authorization");
+
+if (authorizationHeader == null
+        || !authorizationHeader.startsWith("Bearer ")) {
+
+    filterChain.doFilter(request, response);
+    return;
+}
+
+This code is intentional: when there is no Bearer token, the filter passes the request onward. Spring Security should then reject the unauthenticated request with 401, not 403.
+
+Your next action
+Let's check the actual response body, which may reveal the cause.
+
+In Postman, send GET http://localhost:8081/api/test/protected with No Auth.
+
+Open the Body tab in the response panel.
+
+Copy the response body here. If it is empty, tell me empty body.
+
+Also tell me whether the response includes a WWW-Authenticate header.
+
+Do not change the code yet. The response body and header will help us distinguish a Spring Security authorization issue from a response generated elsewhere.
+
+response body 1 403
+
+Please write in English language.
+Understood. Your request returns 403 Forbidden, and the response body only shows 403. Let's check one important possibility: whether Spring Security is applying a different configuration or rejecting the request before it reaches your controller.
+
+Step 645: Enable Spring Security debug logging
+1. Open application.properties
+Path:
+
+src/main/resources/application.properties
+
+Add this line at the bottom:
+
+logging.level.org.springframework.security=DEBUG
+This enables detailed Spring Security logs in the IntelliJ console.
+
+2. Restart auth-service
+Stop the application and run it again in IntelliJ IDEA.
+
+3. Send the request again
+In Postman, send:
+
+GET http://localhost:8081/api/test/protected
+
+Set Authorization → No Auth.
+
+4. Check the IntelliJ console
+Look for log messages mentioning:
+
+JwtAuthenticationFilter
+
+AnonymousAuthenticationFilter
+
+ExceptionTranslationFilter
+
+AccessDeniedException
+
+CsrfFilter
+
+Copy the relevant log lines around the time you sent the request. Remove any tokens or secrets if they appear.
+
+Your task: Enable debug logging, restart the application, reproduce the 403, and send me the relevant console logs. We'll use those logs to identify the actual cause rather than making speculative changes.
+
+Global AuthenticationManager configured with UserDetailsService bean with name inMemoryUserDetailsManager
+2026-10-10T21:36:27.417+05:30 DEBUG 30684 --- [auth-service] [           main] o.s.s.web.DefaultSecurityFilterChain     : Will secure any request with filters: DisableEncodeUrlFilter, WebAsyncManagerIntegrationFilter, SecurityContextHolderFilter, HeaderWriterFilter, LogoutFilter, JwtAuthenticationFilter, RequestCacheAwareFilter, SecurityContextHolderAwareRequestFilter, AnonymousAuthenticationFilter, SessionManagementFilter, ExceptionTranslationFilter, AuthorizationFilter
+2026-10-10T21:36:28.007+05:30  INFO 30684 --- [auth-service] [           main] o.s.b.a.e.web.EndpointLinksResolver      : Exposing 2 endpoints beneath base path '/actuator'
+2026-10-10T21:36:28.127+05:30  INFO 30684 --- [auth-service] [           main] o.s.boot.tomcat.TomcatWebServer          : Tomcat started on port 8081 (http) with context path '/'
+2026-10-10T21:36:28.137+05:30  INFO 30684 --- [auth-service] [           main] c.lottery.auth.AuthServiceApplication    : Started AuthServiceApplication in 9.244 seconds (process running for 10.424)
+2026-10-10T21:36:51.194+05:30  INFO 30684 --- [auth-service] [nio-8081-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-10-10T21:36:51.195+05:30  INFO 30684 --- [auth-service] [nio-8081-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-10-10T21:36:51.203+05:30  INFO 30684 --- [auth-service] [nio-8081-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 6 ms
+2026-10-10T21:36:51.310+05:30 DEBUG 30684 --- [auth-service] [nio-8081-exec-1] o.s.security.web.FilterChainProxy        : Securing GET /api/test/protected
+2026-10-10T21:36:51.382+05:30 DEBUG 30684 --- [auth-service] [nio-8081-exec-1] o.s.s.w.a.AnonymousAuthenticationFilter  : Set SecurityContextHolder to anonymous SecurityContext
+2026-10-10T21:36:51.411+05:30 DEBUG 30684 --- [auth-service] [nio-8081-exec-1] o.s.s.w.a.Http403ForbiddenEntryPoint     : Pre-authenticated entry point called. Rejecting access
+2026-10-10T21:36:51.429+05:30 DEBUG 30684 --- [auth-service] [nio-8081-exec-1] o.s.security.web.FilterChainProxy        : Securing GET /error
+2026-10-10T21:36:51.432+05:30 DEBUG 30684 --- [auth-service] [nio-8081-exec-1] o.s.s.w.a.AnonymousAuthenticationFilter  : Set SecurityContextHolder to anonymous SecurityContext
+2026-10-10T21:36:51.435+05:30 DEBUG 30684 --- [auth-service] [nio-8081-exec-1] o.s.s.w.a.Http403ForbiddenEntryPoint     : Pre-authenticated entry point called. Rejecting access
+
+Please write in English language.
+…
+Great! These logs help us identify the likely cause. Your JWT filter is registered, and Spring Security is treating the request as anonymous. The key line is:
+
+Http403ForbiddenEntryPoint : Pre-authenticated entry point called. Rejecting access
+This suggests that Spring Security is using a pre-authentication entry point, which is unusual for our intended JWT setup. Let's explicitly configure the authentication entry point to return 401 Unauthorized for unauthenticated requests.
+
+Step 646: Configure the authentication entry point
+1. Open SecurityConfig.java
+Path: com.lottery.auth.config.SecurityConfig.java
+
+2. Add this import
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
+import org.springframework.http.HttpStatus;
+
+3. Update the security filter chain
+Inside your existing securityFilterChain() method, add this line after .formLogin(...) and before .addFilterBefore(...):
+
+.exceptionHandling(exception -> exception
+    .authenticationEntryPoint(
+        new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
+
+That section should look like this:
+
+.httpBasic(basic -> basic.disable())
+.formLogin(form -> form.disable())
+.exceptionHandling(exception -> exception
+    .authenticationEntryPoint(
+        new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
+.addFilterBefore(
+    jwtAuthenticationFilter,
+    UsernamePasswordAuthenticationFilter.class);
+
+Keep the rest of your configuration unchanged.
+
+4. Restart and test
+Restart auth-service, then send:
+
+GET http://localhost:8081/api/test/protected
+
+In Postman, select Authorization → No Auth.
+
+Expected result: 401 Unauthorized instead of 403 Forbidden.
+
+Your task
+Make this change and test the request. Tell me the resulting status code.
+
+If the response changes to 401, we will then test the same endpoint with a valid JWT to confirm successful authentication.
+
+401
+
+Please write in English language.
+Excellent! ✅ Your protected API now returns 401 Unauthorized when you send a request without a JWT token. This is the expected behavior.
+
+Step 647: Test the protected API with your JWT token
+Now we will verify that a logged-in user can access the protected API.
+
+1. Open Postman
+Use this request:
+
+Method: GET
+
+URL: http://localhost:8081/api/test/protected
+
+2. Add your JWT token
+Open the Authorization tab.
+
+Select Bearer Token as the Type.
+
+Open the successful login response and copy the value of accessToken.
+
+Paste it into the Token field.
+
+Do not share your token here. Treat it like a password.
+
+3. Click Send
+Expected response:
+
+Status: 200 OK
+
+{
+  "message": "JWT authentication successful!",
+  "status": "You accessed a protected endpoint."
+}
+
+This confirms that Spring Security accepts your JWT and allows access to the protected endpoint.
+
+Please test this and tell me the status code you receive. We will proceed to the next Step 6after confirming the result.
+
+
+Continued from
+Build Lottery Management System (3)
+tables alredy creted
+
+Great! If you've already created the tables in lottery_db, we don't need to create them again. 👍
+
+Step 8: Verify the database configuration
+Before proceeding, let's ensure lottery-service connects to the correct database and that its existing tables match the Java entity classes.
+
+1. Confirm the database name
+In MySQL Workbench, run:
+
+USE lottery_db;
+SHOW TABLES;
+
+2. Tell me which tables you created
+Please share the table names you see in the output. For example, you might have tables such as lottery_schemes, lottery_tickets, or lottery_draws.
+
+If you created the tables in a different database, tell me that database name instead.
+
+Why this matters: Your application uses spring.jpa.hibernate.ddl-auto=validate, so Hibernate checks the existing tables against your Java entity classes. We should match your existing schema rather than accidentally creating duplicates or changing your database structure.
+
+Once I know your table names, we'll connect the existing tables to lottery-service step by step.
+
+lotteries
+lottery_rules
+prize_tiers
+Perfect! ✅ Your lottery_db already contains these three tables:
+
+lotteries — stores lottery details.
+
+lottery_rules — stores the rules for each lottery.
+
+prize_tiers — stores the prize levels and amounts.
+
+We'll reuse these existing tables instead of creating duplicates.
+
+Step 9: Check the structure of your tables
+Before writing 
+Java entity classes, we need to know the exact column names, data types, and relationships in your tables.
+
+Open MySQL Workbench and execute these SQL statements:
+
+
+USE lottery_db;
+
+DESCRIBE lotteries;
+DESCRIBE lottery_rules;
+DESCRIBE prize_tiers;
+
+What does DESCRIBE do?
+It displays each table's columns, data types, primary keys, and whether a column accepts NULL.
+
+For example, a lotteries table might contain id, name, and status. We need your actual structure rather than assuming those columns exist.
+
+Your task
+Run the three commands and paste the complete output here.
+
+Then I'll guide you through creating the Java entity classes that map to your existing MySQL tables, one class at a time.
+
+15:56:50	DESCRIBE lottery_rules	10 row(s) returned	0.000 sec / 0.000 sec
+
+15:56:50	DESCRIBE prize_tiers	7 row(s) returned	0.000 sec / 0.000 sec
+
+15:57:11	DESCRIBE lotteries	14 row(s) returned	0.000 sec / 0.000 sec
+Great! ✅ All three DESCRIBE commands executed successfully.
+
+However, the output you shared shows the number of rows returned, not the actual column definitions. We need those definitions to create Java entity classes that match your existing database.
+
+Step 10: Copy the actual table structures
+In MySQL Workbench, run this query:
+
+
+SHOW CREATE TABLE lotteries;
+SHOW CREATE TABLE lottery_rules;
+SHOW CREATE TABLE prize_tiers;
+
+For each result:
+
+Click the result cell containing the table's CREATE TABLE statement.
+
+Copy the full SQL statement.
+
+Paste all three statements here.
+
+These statements show the column names, data types, primary keys, foreign keys, and constraints.
+
+Why do we need this? Your Spring Boot configuration uses spring.jpa.hibernate.ddl-auto=validate. If our Java entity mappings don't match the existing schema, the application may fail during startup.
+
+Once you share the output, we'll create the first entity class for lotteries and explain every part of the code.
+
+'lotteries', 'CREATE TABLE lotteries (\n  id bigint NOT NULL AUTO_INCREMENT,\n  lottery_code varchar(50) NOT NULL,\n  name varchar(150) NOT NULL,\n  description text,\n  ticket_price decimal(12,2) NOT NULL,\n  currency varchar(3) NOT NULL DEFAULT \'INR\',\n  status varchar(30) NOT NULL DEFAULT \'DRAFT\',\n  sales_start_at datetime NOT NULL,\n  sales_end_at datetime NOT NULL,\n  draw_at datetime NOT NULL,\n  max_tickets bigint DEFAULT NULL,\n  created_by bigint NOT NULL,\n  created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  UNIQUE KEY lottery_code (lottery_code),\n  KEY idx_lottery_status (status),\n  KEY idx_lottery_draw_at (draw_at),\n  CONSTRAINT chk_lottery_dates CHECK (((sales_start_at < sales_end_at) and (sales_end_at <= draw_at))),\n  CONSTRAINT chk_ticket_price CHECK ((ticket_price > 0))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci'
+Perfect! We now have the actual structure of your lotteries table. We'll create a Java entity that maps to this existing MySQL table without changing the database.
+
+Step 11: Create the Lottery entity class
+1. Create the package
+In IntelliJ, navigate to:
+
+lottery-service → src/main/java → com.lottery.lottery
+
+Right-click com.lottery.lottery → New → Package.
+
+Enter:
+
+com.lottery.lottery.entity
+
+2. Create the Java class
+Right-click the new entity package → New → Java Class.
+
+Name it Lottery.
+
+3. Add this code
+
+package com.lottery.lottery.entity;
+
+import jakarta.persistence.*;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "lotteries")
+public class Lottery {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "lottery_code", nullable = false, unique = true, length = 50)
+    private String lotteryCode;
+
+    @Column(nullable = false, length = 150)
+    private String name;
+
+    @Column(columnDefinition = "TEXT")
+    private String description;
+
+    @Column(name = "ticket_price", nullable = false, precision = 12, scale = 2)
+    private BigDecimal ticketPrice;
+
+    @Column(nullable = false, length = 3)
+    private String currency = "INR";
+
+    @Column(nullable = false, length = 30)
+    private String status = "DRAFT";
+
+    @Column(name = "sales_start_at", nullable = false)
+    private LocalDateTime salesStartAt;
+
+    @Column(name = "sales_end_at", nullable = false)
+    private LocalDateTime salesEndAt;
+
+    @Column(name = "draw_at", nullable = false)
+    private LocalDateTime drawAt;
+
+    @Column(name = "max_tickets")
+    private Long maxTickets;
+
+    @Column(name = "created_by", nullable = false)
+    private Long createdBy;
+
+    @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false, insertable = false, updatable = false)
+    private LocalDateTime updatedAt;
+
+    public Lottery() {
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public String getLotteryCode() {
+        return lotteryCode;
+    }
+
+    public void setLotteryCode(String lotteryCode) {
+        this.lotteryCode = lotteryCode;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public void setDescription(String description) {
+        this.description = description;
+    }
+
+    public BigDecimal getTicketPrice() {
+        return ticketPrice;
+    }
+
+    public void setTicketPrice(BigDecimal ticketPrice) {
+        this.ticketPrice = ticketPrice;
+    }
+
+    public String getCurrency() {
+        return currency;
+    }
+
+    public void setCurrency(String currency) {
+        this.currency = currency;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public LocalDateTime getSalesStartAt() {
+        return salesStartAt;
+    }
+
+    public void setSalesStartAt(LocalDateTime salesStartAt) {
+        this.salesStartAt = salesStartAt;
+    }
+
+    public LocalDateTime getSalesEndAt() {
+        return salesEndAt;
+    }
+
+    public void setSalesEndAt(LocalDateTime salesEndAt) {
+        this.salesEndAt = salesEndAt;
+    }
+
+    public LocalDateTime getDrawAt() {
+        return drawAt;
+    }
+
+    public void setDrawAt(LocalDateTime drawAt) {
+        this.drawAt = drawAt;
+    }
+
+    public Long getMaxTickets() {
+        return maxTickets;
+    }
+
+    public void setMaxTickets(Long maxTickets) {
+        this.maxTickets = maxTickets;
+    }
+
+    public Long getCreatedBy() {
+        return createdBy;
+    }
+
+    public void setCreatedBy(Long createdBy) {
+        this.createdBy = createdBy;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public LocalDateTime getUpdatedAt() {
+        return updatedAt;
+    }
+}
+
+Understand the important parts
+Java code
+
+Purpose
+
+@Entity
+
+Tells JPA this class represents a database entity.
+
+@Table(name = "lotteries")
+
+Maps the class to your existing lotteries table.
+
+@Id
+
+Identifies the primary key.
+
+@GeneratedValue
+
+Lets MySQL generate the id automatically.
+
+BigDecimal
+
+Represents ticket prices accurately without floating-point rounding issues.
+
+LocalDateTime
+
+Represents the MySQL datetime columns.
+
+insertable = false, updatable = false
+
+Lets MySQL manage the creation and update timestamps.
+
+Important: This class maps the existing table; it does not create a new table. We'll use LotteryRepository next to read and save lottery records.
+
+Your task
+Create Lottery.java, save it, and tell me done. If IntelliJ shows any red errors, send me the error text before proceeding.
+
+Table	Create Table
+lottery_rules	CREATE TABLE `lottery_rules` (   `id` bigint NOT NULL AUTO_INCREMENT,   `lottery_id` bigint NOT NULL,   `number_count` int NOT NULL,   `min_number` int NOT NULL,   `max_number` int NOT NULL,   `allow_multiple_winners` tinyint(1) NOT NULL DEFAULT '1',   `...
+
+Table	Create Table
+prize_tiers	CREATE TABLE `prize_tiers` (   `id` bigint NOT NULL AUTO_INCREMENT,   `lottery_id` bigint NOT NULL,   `tier_number` int NOT NULL,   `tier_name` varchar(100) NOT NULL,   `prize_amount` decimal(15,2) NOT NULL,   `winner_count` int NOT NULL,   `created_at` ...
+
+and Lottery.java created
+
+…
+Great! Since you have created Lottery.java, we can continue with the next step in your Lottery Management System.
+
+Your database already contains these three tables:
+
+lotteries
+
+lottery_rules
+
+prize_tiers
+
+The table definitions you shared for lottery_rules and prize_tiers are truncated, so we will work with the lotteries table first.
+
+Step 12: Create LotteryRepository
+The repository will allow Spring Boot to interact with the lotteries table through your Lottery entity.
+
+1. Create the repository package
+In IntelliJ, under src/main/java, navigate to:
+
+com.lottery.lottery
+
+Right-click the package → New → Package.
+
+Enter:
+
+com.lottery.lottery.repository
+
+2. Create the interface
+Right-click the new repository package → New → Java Class.
+
+Name it LotteryRepository.
+
+Choose Interface if IntelliJ offers that option. Otherwise, create a Java class and change class to interface.
+
+Add this code:
+
+
+package com.lottery.lottery.repository;
+
+import com.lottery.lottery.entity.Lottery;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface LotteryRepository extends JpaRepository<Lottery, Long> {
+}
+
+3. Understand the code
+JpaRepository provides standard database operations without requiring you to write SQL for each one.
+
+Lottery tells Spring which entity this repository manages.
+
+Long represents the data type of the lotteries.id primary key.
+
+For example, this repository will eventually support:
+
+Method
+
+Purpose
+
+save(lottery)
+
+Insert or update a lottery
+
+findById(id)
+
+Find a lottery by ID
+
+findAll()
+
+Retrieve all lotteries
+
+deleteById(id)
+
+Delete a lottery by ID
+
+existsById(id)
+
+Check whether a lottery exists
+
+You don't need to implement these methods yourself.
+
+Your task now: Create and save LotteryRepository.java. Don't add any other code yet.
+
+Reply done when finished, or send me the error message if IntelliJ shows one.
